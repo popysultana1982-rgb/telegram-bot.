@@ -90,12 +90,78 @@ def start_health_server():
     server.serve_forever()
 
 # ------------------------------------------------------------------------------
-# 3. DATABASE LAYER (SQLite)
+# 3. DUAL-ENGINE CLOUD & LOCAL DATABASE LAYER (Neon PostgreSQL + SQLite Fallback)
 # ------------------------------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+IS_POSTGRES = bool(DATABASE_URL and ("postgres" in DATABASE_URL))
+
+if IS_POSTGRES:
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ImportError:
+        IS_POSTGRES = False
+
+class SmartCursor:
+    def __init__(self, raw_cursor, is_pg):
+        self.raw = raw_cursor
+        self.is_pg = is_pg
+        self._lastrowid = None
+
+    def execute(self, sql, params=None):
+        if self.is_pg:
+            sql = sql.replace("?", "%s")
+            # If INSERT into tables with auto-increment 'id', fetch RETURNING id for lastrowid
+            if sql.strip().upper().startswith("INSERT INTO") and ("RETURNING" not in sql.upper()) and ("SETTINGS" not in sql.upper()) and ("USERS" not in sql.upper()):
+                sql += " RETURNING id"
+                try:
+                    res = self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
+                    row = self.raw.fetchone()
+                    if row:
+                        self._lastrowid = row["id"] if isinstance(row, dict) else row[0]
+                    return res
+                except Exception:
+                    self.raw.connection.rollback()
+                    pass
+            return self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
+        else:
+            res = self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
+            self._lastrowid = getattr(self.raw, "lastrowid", None)
+            return res
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    def fetchone(self):
+        return self.raw.fetchone()
+
+    def fetchall(self):
+        return self.raw.fetchall()
+
+class DBWrapper:
+    def __init__(self):
+        self.is_pg = IS_POSTGRES
+        if self.is_pg:
+            url = DATABASE_URL
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+            self.conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            self.conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+
+    def cursor(self):
+        return SmartCursor(self.conn.cursor(), self.is_pg)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
 def get_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return DBWrapper()
 
 def init_db():
     conn = get_db()
