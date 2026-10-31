@@ -90,17 +90,30 @@ def start_health_server():
     server.serve_forever()
 
 # ------------------------------------------------------------------------------
-# 3. DUAL-ENGINE CLOUD & LOCAL DATABASE LAYER (Neon PostgreSQL + SQLite Fallback)
+# 3. HIGH-SPEED PERSISTENT DUAL-ENGINE DATABASE LAYER (PostgreSQL + SQLite)
 # ------------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 IS_POSTGRES = bool(DATABASE_URL and ("postgres" in DATABASE_URL))
 
-if IS_POSTGRES:
-    try:
+_GLOBAL_CONN = None
+
+def get_raw_connection():
+    global _GLOBAL_CONN
+    if IS_POSTGRES:
         import psycopg2
         import psycopg2.extras
-    except ImportError:
-        IS_POSTGRES = False
+        if _GLOBAL_CONN is None or _GLOBAL_CONN.closed:
+            url = DATABASE_URL
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+            _GLOBAL_CONN = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+            _GLOBAL_CONN.autocommit = True
+        return _GLOBAL_CONN
+    else:
+        if _GLOBAL_CONN is None:
+            _GLOBAL_CONN = sqlite3.connect(DB_FILE, check_same_thread=False)
+            _GLOBAL_CONN.row_factory = sqlite3.Row
+        return _GLOBAL_CONN
 
 class SmartCursor:
     def __init__(self, raw_cursor, is_pg):
@@ -110,20 +123,19 @@ class SmartCursor:
 
     def execute(self, sql, params=None):
         if self.is_pg:
-            # 1. Translate placeholders
+            # 1. Translate parameter placeholder
             sql = sql.replace("?", "%s")
-            # 2. Translate SQLite DDL to PostgreSQL DDL
+            # 2. DDL translations
             sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
             sql = sql.replace("AUTOINCREMENT", "")
-            sql = sql.replace("INTEGER PRIMARY KEY", "BIGINT PRIMARY KEY")
             sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
             if "INSERT INTO settings" in sql and "ON CONFLICT" not in sql:
                 sql += " ON CONFLICT (key) DO NOTHING"
             if "INSERT INTO users" in sql and "ON CONFLICT" not in sql:
                 sql += " ON CONFLICT (user_id) DO NOTHING"
-            
+
             # 3. Handle RETURNING id for lastrowid
-            if sql.strip().upper().startswith("INSERT INTO") and ("RETURNING" not in sql.upper()) and ("SETTINGS" not in sql.upper()):
+            if sql.strip().upper().startswith("INSERT INTO") and ("RETURNING" not in sql.upper()) and ("SETTINGS" not in sql.upper()) and ("USERS" not in sql.upper()):
                 sql += " RETURNING id"
                 try:
                     res = self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
@@ -131,12 +143,18 @@ class SmartCursor:
                     if row:
                         self._lastrowid = row["id"] if isinstance(row, dict) else row[0]
                     return res
-                except Exception:
-                    self.raw.connection.rollback()
+                except Exception as e:
+                    logger.warning(f"Insert returning error: {e}")
                     pass
-            return self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
+            # Normal execution
+            if params is not None:
+                return self.raw.execute(sql, params)
+            return self.raw.execute(sql)
         else:
-            res = self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
+            if params is not None:
+                res = self.raw.execute(sql, params)
+            else:
+                res = self.raw.execute(sql)
             self._lastrowid = getattr(self.raw, "lastrowid", None)
             return res
 
@@ -153,23 +171,24 @@ class SmartCursor:
 class DBWrapper:
     def __init__(self):
         self.is_pg = IS_POSTGRES
-        if self.is_pg:
-            url = DATABASE_URL
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-            self.conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
-        else:
-            self.conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
+        self.conn = get_raw_connection()
 
     def cursor(self):
-        return SmartCursor(self.conn.cursor(), self.is_pg)
+        try:
+            return SmartCursor(self.conn.cursor(), self.is_pg)
+        except Exception:
+            # Reconnect if connection was dropped by server
+            global _GLOBAL_CONN
+            _GLOBAL_CONN = None
+            self.conn = get_raw_connection()
+            return SmartCursor(self.conn.cursor(), self.is_pg)
 
     def commit(self):
-        self.conn.commit()
+        if not self.is_pg:
+            self.conn.commit()
 
     def close(self):
-        self.conn.close()
+        pass  # Keep persistent connection alive for blazing fast speed
 
 def get_db():
     return DBWrapper()
@@ -289,11 +308,11 @@ def init_db():
         "shop_name": "Will be Earn Shop",
         "shop_tagline": "Digital Products & Services",
         "usdt_rate": "125.0",
-        "support_username": "@FastSupport",
+        "support_username": "@Talha_juba098",
         "bkash_number": "01XXXXXXXXX (Personal - Send Money)",
         "nagad_number": "01XXXXXXXXX (Personal - Send Money)",
         "binance_id": "Pay ID: 12345678 / USDT (TRC20): TQxxxxxxxxxxxxxxxxxx",
-        "mail_code_url_1": "https://email-otp-viewer.example.com",
+        "mail_code_url_1": "https://code.yamin.bd/",
         "mail_code_url_2": "https://outlook-code.example.com",
     }
     for k, v in default_settings.items():
@@ -303,10 +322,24 @@ def init_db():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
     conn.commit()
 
-    # Seed Initial Categories and Products if empty
+    # Auto-healing: Ensure categories, subcategories, and products are fully populated
     cursor.execute("SELECT COUNT(*) as cnt FROM categories")
-    if cursor.fetchone()["cnt"] == 0:
+    row = cursor.fetchone()
+    cnt = row["cnt"] if isinstance(row, dict) else row[0]
+    cursor.execute("SELECT COUNT(*) as cnt FROM subcategories")
+    s_row = cursor.fetchone()
+    s_cnt = s_row["cnt"] if isinstance(s_row, dict) else s_row[0]
+    if cnt == 0 or s_cnt == 0:
+        logger.info("Database categories or subcategories missing, auto-healing and re-seeding...")
+        try:
+            cursor.execute("DELETE FROM products")
+            cursor.execute("DELETE FROM subcategories")
+            cursor.execute("DELETE FROM categories")
+            conn.commit()
+        except Exception:
+            pass
         seed_clean_store(conn)
+        logger.info("Auto-healing and seeding completed successfully.")
 
     conn.close()
 
@@ -823,8 +856,7 @@ async def buy_products_menu_handler(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def get_code_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url1 = get_setting("mail_code_url_1", "https://example.com")
-    url2 = get_setting("mail_code_url_2", "https://example.com")
+    url = get_setting("mail_code_url_1", "https://code.yamin.bd/")
 
     text = (
         "🔐 <b>Get Code & Authentication Tools</b>\n\n"
@@ -832,8 +864,7 @@ async def get_code_menu_handler(update: Update, context: ContextTypes.DEFAULT_TY
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔑 2FA Authenticator (Live Code)", callback_data="tool_2fa_prompt")],
-        [InlineKeyboardButton("🌐 Hotmail/Outlook Code Server 1", url=url1)],
-        [InlineKeyboardButton("🌐 Hotmail/Outlook Code Server 2", url=url2)],
+        [InlineKeyboardButton("🌐 Hotmail & Outlook Code Server", url=url)],
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
