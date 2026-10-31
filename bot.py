@@ -147,9 +147,17 @@ class SmartCursor:
                     logger.warning(f"Insert returning error: {e}")
                     pass
             # Normal execution
-            if params is not None:
-                return self.raw.execute(sql, params)
-            return self.raw.execute(sql)
+            try:
+                if params is not None:
+                    return self.raw.execute(sql, params)
+                return self.raw.execute(sql)
+            except Exception as e:
+                try:
+                    self.raw.connection.rollback()
+                except Exception:
+                    pass
+                logger.error(f"SQL execution error: {e} in {sql}")
+                raise
         else:
             if params is not None:
                 res = self.raw.execute(sql, params)
@@ -879,8 +887,7 @@ async def support_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "যেকোনো সমস্যায় নিচে এডমিনকে মেসেজ দিন:"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📨 Message Admin (@Talha_juba098)", url="https://t.me/Talha_juba098")],
-        [InlineKeyboardButton("👤 Direct Contact (ID: 8919985167)", url="tg://user?id=8919985167")]
+        [InlineKeyboardButton("📨 Message Admin", url="tg://user?id=8919985167")]
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
@@ -1455,6 +1462,16 @@ async def admin_panel_menu_handler(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
+    try:
+        await _dispatch_admin_callback(query, data, context, user_id)
+    except Exception as e:
+        logger.error(f"Error in admin callback {data}: {e}", exc_info=True)
+        try:
+            await query.message.reply_text(f"⚠️ এডমিন রিকোয়েস্টে সমস্যা হয়েছে: {e}\nদয়া করে আবার চেষ্টা করুন।")
+        except Exception:
+            pass
+
+async def _dispatch_admin_callback(query, data: str, context: ContextTypes.DEFAULT_TYPE, user_id: int):
 
     # Root Admin Dashboard
     if data in ("adm_root", "admin_root"):
@@ -1505,8 +1522,8 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         FROM products p
         JOIN subcategories s ON p.subcategory_id = s.id
         LEFT JOIN stock st ON p.id = st.product_id AND st.is_sold = 0
-        GROUP BY p.id
-        HAVING p.is_on_demand = 0
+        WHERE p.is_on_demand = 0
+        GROUP BY p.id, s.name, p.name
         """)
         rows = c.fetchall()
         conn.close()
@@ -1840,10 +1857,101 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             )
         return
 
-    # User Management
-    if data == "adm_user_mgmt":
-        set_user_state(user_id, "ADMIN_WAITING_USER_SEARCH", {})
-        await query.message.reply_text("🔍 ইউজারের <b>টেলিগ্রাম নিউমেরিক আইডি</b> লিখে পাঠান:", parse_mode=ParseMode.HTML)
+    # Interactive User Management (List of all users without typing IDs)
+    if data.startswith("adm_user_mgmt"):
+        page = 0
+        if "_" in data:
+            parts = data.split("_")
+            if len(parts) >= 4 and parts[3].isdigit():
+                page = int(parts[3])
+
+        limit = 8
+        offset = page * limit
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as total FROM users")
+        total_u = c.fetchone()["total"]
+
+        c.execute("SELECT user_id, name, balance_bdt FROM users ORDER BY user_id DESC LIMIT ? OFFSET ?", (limit, offset))
+        u_list = c.fetchall()
+        conn.close()
+
+        txt = (
+            f"👥 <b>ইউজার ম্যানেজমেন্ট ও প্রোফাইল লিস্ট</b>\n"
+            f"─────────────────────────────\n"
+            f"মোট রেজিস্টার্ড ইউজার: <b>{total_u}</b> জন\n"
+            f"নিচের যেকোনো ইউজারের উপর ক্লিক করে তার প্রোফাইল, কেনাকাটার হিসাব ও ব্যালেন্স দেখতে পারবেন:"
+        )
+
+        kb = []
+        for u in u_list:
+            u_name = u["name"][:16] if u["name"] else "User"
+            btn_title = f"👤 {u_name} (ID: {u['user_id']}) - {u['balance_bdt']:.0f} Tk"
+            kb.append([InlineKeyboardButton(btn_title, callback_data=f"adm_uview_{u['user_id']}")])
+
+        # Pagination buttons
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀️ Previous", callback_data=f"adm_user_mgmt_page_{page - 1}"))
+        if (offset + limit) < total_u:
+            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_user_mgmt_page_{page + 1}"))
+        if nav_row:
+            kb.append(nav_row)
+
+        kb.append([InlineKeyboardButton("< Back to Dashboard", callback_data="adm_root")])
+        await query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # View Specific User Card
+    if data.startswith("adm_uview_"):
+        target_uid = int(data.split("_")[2])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (target_uid,))
+        u = c.fetchone()
+        c.execute("SELECT COUNT(*) as cnt, SUM(total_bdt) as spent FROM orders WHERE user_id = ? AND status = 'completed'", (target_uid,))
+        stats = c.fetchone()
+        c.execute("SELECT product_name, quantity, total_bdt, order_date FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 5", (target_uid,))
+        recent_orders = c.fetchall()
+        conn.close()
+
+        if not u:
+            await query.message.reply_text("❌ এই ইউজারকে পাওয়া যায়নি।")
+            return
+
+        spent = stats["spent"] or 0.0
+        contact_url = f"tg://user?id={u['user_id']}"
+
+        orders_txt = ""
+        if recent_orders:
+            orders_txt = "\n<b>সাম্প্রতিক কেনাকাটা:</b>\n"
+            for ro in recent_orders:
+                orders_txt += f"• {ro['product_name']} ({ro['quantity']} টি) - {ro['total_bdt']:.0f} Tk\n"
+
+        info = (
+            f"👤 <b>ইউজার প্রোফাইল:</b>\n"
+            f"─────────────────────────────\n"
+            f"🆔 <b>আইডি:</b> <code>{u['user_id']}</code>\n"
+            f"👤 <b>নাম:</b> {u['name']}\n"
+            f"💬 <b>ইউজারনেম:</b> @{u['username'] if u['username'] else 'None'}\n"
+            f"💰 <b>বর্তমান ব্যালেন্স:</b> <b>{u['balance_bdt']:.2f} BDT</b>\n"
+            f"🛍️ <b>মোট সফল অর্ডার:</b> {stats['cnt']} টি (মোট খরচ: {spent:.2f} BDT)\n"
+            f"📅 <b>জয়েনিং তারিখ:</b> {u['joined_date']}\n"
+            f"{orders_txt}"
+        )
+        ukb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("➕ Add Balance", callback_data=f"adm_user_addbal_{u['user_id']}"),
+                InlineKeyboardButton("➖ Deduct Balance", callback_data=f"adm_user_dedbal_{u['user_id']}"),
+            ],
+            [
+                InlineKeyboardButton("💬 Contact User (Direct Chat)", url=contact_url),
+            ],
+            [
+                InlineKeyboardButton("< Back to Users", callback_data="adm_user_mgmt"),
+            ]
+        ])
+        await query.edit_message_text(info, parse_mode=ParseMode.HTML, reply_markup=ukb)
         return
 
     # Statistics
