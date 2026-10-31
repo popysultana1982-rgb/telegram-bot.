@@ -110,9 +110,20 @@ class SmartCursor:
 
     def execute(self, sql, params=None):
         if self.is_pg:
+            # 1. Translate placeholders
             sql = sql.replace("?", "%s")
-            # If INSERT into tables with auto-increment 'id', fetch RETURNING id for lastrowid
-            if sql.strip().upper().startswith("INSERT INTO") and ("RETURNING" not in sql.upper()) and ("SETTINGS" not in sql.upper()) and ("USERS" not in sql.upper()):
+            # 2. Translate SQLite DDL to PostgreSQL DDL
+            sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+            sql = sql.replace("AUTOINCREMENT", "")
+            sql = sql.replace("INTEGER PRIMARY KEY", "BIGINT PRIMARY KEY")
+            sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+            if "INSERT INTO settings" in sql and "ON CONFLICT" not in sql:
+                sql += " ON CONFLICT (key) DO NOTHING"
+            if "INSERT INTO users" in sql and "ON CONFLICT" not in sql:
+                sql += " ON CONFLICT (user_id) DO NOTHING"
+            
+            # 3. Handle RETURNING id for lastrowid
+            if sql.strip().upper().startswith("INSERT INTO") and ("RETURNING" not in sql.upper()) and ("SETTINGS" not in sql.upper()):
                 sql += " RETURNING id"
                 try:
                     res = self.raw.execute(sql, params) if params is not None else self.raw.execute(sql)
@@ -170,7 +181,7 @@ def init_db():
     # Users Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
+        user_id BIGINT PRIMARY KEY,
         name TEXT,
         username TEXT,
         balance_bdt REAL DEFAULT 0.0,
@@ -222,7 +233,7 @@ def init_db():
         product_id INTEGER,
         content TEXT NOT NULL,
         is_sold INTEGER DEFAULT 0,
-        sold_to INTEGER,
+        sold_to BIGINT,
         sold_at TEXT,
         FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
     )
@@ -233,7 +244,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         receipt_no TEXT UNIQUE,
-        user_id INTEGER,
+        user_id BIGINT,
         product_id INTEGER,
         product_name TEXT,
         category_name TEXT,
@@ -253,7 +264,7 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS deposits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        user_id BIGINT,
         method TEXT,
         amount REAL,
         trx_id TEXT,
@@ -286,7 +297,10 @@ def init_db():
         "mail_code_url_2": "https://outlook-code.example.com",
     }
     for k, v in default_settings.items():
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        if conn.is_pg:
+            cursor.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", (k, v))
+        else:
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
     conn.commit()
 
     # Seed Initial Categories and Products if empty
