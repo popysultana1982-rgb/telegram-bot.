@@ -341,6 +341,13 @@ def init_db():
         seed_clean_store(conn)
         logger.info("Auto-healing and seeding completed successfully.")
 
+    # Force update verified settings in database
+    try:
+        cursor.execute("UPDATE settings SET value = 'https://code.yamin.bd/' WHERE key = 'mail_code_url_1'")
+        cursor.execute("UPDATE settings SET value = '@Talha_juba098' WHERE key = 'support_username'")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 def seed_clean_store(conn):
@@ -856,27 +863,25 @@ async def buy_products_menu_handler(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def get_code_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = get_setting("mail_code_url_1", "https://code.yamin.bd/")
-
     text = (
         "🔐 <b>Get Code & Authentication Tools</b>\n\n"
         "হটমেইল/আউটলুক ওটিপি কোড এবং লাইভ 2FA কোড পাওয়ার জন্য নিচের অপশন থেকে নির্বাচন করুন:"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔑 2FA Authenticator (Live Code)", callback_data="tool_2fa_prompt")],
-        [InlineKeyboardButton("🌐 Hotmail & Outlook Code Server", url=url)],
+        [InlineKeyboardButton("🌐 Hotmail & Outlook Code Server", url="https://code.yamin.bd/")],
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def support_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    supp = get_setting("support_username", "@FastSupport")
     text = (
-        f"💬 <b>কাস্টমার সাপোর্ট</b>\n\n"
-        f"যেকোনো সমস্যা, প্রোডাক্ট রিকোয়েস্ট বা ডিপোজিটের সহায়তায় সরাসরি যোগাযোগ করুন:\n"
-        f"👉 <b>{supp}</b>\n\n"
-        f"আমরা ২৪/৭ সক্রিয় আছি।"
+        "💬 <b>কাস্টমার সাপোর্ট</b>\n\n"
+        "যেকোনো সমস্যায় নিচে এডমিনকে মেসেজ দিন:"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📨 Contact Support", url=f"https://t.me/{supp.lstrip('@')}") ]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 Message Admin (@Talha_juba098)", url="https://t.me/Talha_juba098")],
+        [InlineKeyboardButton("👤 Direct Contact (ID: 8919985167)", url="tg://user?id=8919985167")]
+    ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # Deposit Menu with 3 Separate Buttons: bKash, Nagad, Binance
