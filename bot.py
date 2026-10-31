@@ -1188,9 +1188,10 @@ async def show_product_card(query, prod_id: int):
 
     stock_badge = "⚡ Instant Request Delivery (২৪/৭ ডেলিভারি)" if p["is_on_demand"] else f"{avail_stock} টি স্টকে আছে"
 
+    desc_part = f"\n📝 <i>{p['description']}</i>\n" if p['description'] else ""
     caption = (
         f"<b>{p['sub_name']} — {p['name']}</b>\n"
-        f"─────────────────────────────\n"
+        f"─────────────────────────────{desc_part}\n"
         f"💰 <b>Price:</b> {p['price_bdt']:.2f} BDT / {p['price_usdt']:.4f} USDT per unit\n"
         f"📊 <b>Stock:</b> {stock_badge}\n\n"
         f"Select quantity:"
@@ -1430,16 +1431,19 @@ async def admin_panel_menu_handler(update: Update, context: ContextTypes.DEFAULT
             InlineKeyboardButton("🏷️ Manage Buttons & Prices", callback_data="adm_buttons_menu"),
         ],
         [
+            InlineKeyboardButton("💳 Payment Methods (bKash/Nagad/Binance)", callback_data="adm_payment_methods"),
             InlineKeyboardButton("🖼️ Manage Product Photos", callback_data="adm_photos_menu"),
-            InlineKeyboardButton("👥 User Search & Balance", callback_data="adm_user_mgmt"),
         ],
         [
             InlineKeyboardButton(f"💳 Deposits ({pend_dep})", callback_data="adm_pending_deposits"),
             InlineKeyboardButton(f"🛡️ VPN Orders ({pend_ord})", callback_data="adm_pending_orders"),
         ],
         [
+            InlineKeyboardButton("👥 User Search & Balance", callback_data="adm_user_mgmt"),
             InlineKeyboardButton("📊 Shop Statistics", callback_data="adm_statistics"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="adm_settings"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ General Settings", callback_data="adm_settings"),
         ]
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -1469,16 +1473,19 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
                 InlineKeyboardButton("🏷️ Manage Buttons & Prices", callback_data="adm_buttons_menu"),
             ],
             [
+                InlineKeyboardButton("💳 Payment Methods (bKash/Nagad/Binance)", callback_data="adm_payment_methods"),
                 InlineKeyboardButton("🖼️ Manage Product Photos", callback_data="adm_photos_menu"),
-                InlineKeyboardButton("👥 User Search & Balance", callback_data="adm_user_mgmt"),
             ],
             [
                 InlineKeyboardButton(f"💳 Deposits ({pend_dep})", callback_data="adm_pending_deposits"),
                 InlineKeyboardButton(f"🛡️ VPN Orders ({pend_ord})", callback_data="adm_pending_orders"),
             ],
             [
+                InlineKeyboardButton("👥 User Search & Balance", callback_data="adm_user_mgmt"),
                 InlineKeyboardButton("📊 Shop Statistics", callback_data="adm_statistics"),
-                InlineKeyboardButton("⚙️ Settings", callback_data="adm_settings"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ General Settings", callback_data="adm_settings"),
             ]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -1605,46 +1612,95 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         await query.edit_message_text("✅ ছবি সফলভাবে মুছে ফেলা হয়েছে। এখন এটি ক্লিন টেক্সটে শো করবে।")
         return
 
-    # Button & Price Management Menu (CRUD)
+    # Structured Product & Variant Management Menu (Clean Category-wise Hierarchy)
     if data == "adm_buttons_menu":
         conn = get_db()
         c = conn.cursor()
-        c.execute("""
-        SELECT p.id, s.name as sub_name, p.name as prod_name, p.price_bdt
-        FROM products p
-        JOIN subcategories s ON p.subcategory_id = s.id
-        """)
-        prods = c.fetchall()
+        c.execute("SELECT id, name FROM categories")
+        cats = c.fetchall()
         conn.close()
         kb = []
-        for p in prods:
-            kb.append([InlineKeyboardButton(f"{p['sub_name']} ({p['prod_name']}) - {p['price_bdt']:.0f} Tk", callback_data=f"adm_edit_prod_{p['id']}")])
-        kb.append([InlineKeyboardButton("➕ Add New Product / Variant", callback_data="adm_new_product_step1")])
-        kb.append([InlineKeyboardButton("< Back", callback_data="adm_root")])
-        await query.edit_message_text("দাম এডিট বা রিনেম করতে প্রোডাক্ট সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(kb))
+        for cat in cats:
+            kb.append([InlineKeyboardButton(f"{cat['name']}", callback_data=f"admm_cat_{cat['id']}")])
+        kb.append([InlineKeyboardButton("➕ Add New Category", callback_data="admm_add_cat")])
+        kb.append([InlineKeyboardButton("< Back to Dashboard", callback_data="adm_root")])
+        await query.edit_message_text("🏷️ <b>প্রোডাক্ট ও ভ্যারিয়েন্ট ম্যানেজমেন্ট:</b>\nযে ক্যাটাগরির প্রোডাক্ট পরিচালনা করতে চান, সেটি নির্বাচন করুন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    if data.startswith("adm_edit_prod_"):
-        prod_id = int(data.split("_")[3])
+    # Category Selected -> Show Brands / Subcategories
+    if data.startswith("admm_cat_"):
+        cat_id = int(data.split("_")[2])
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT p.*, s.name as sub_name FROM products p JOIN subcategories s ON p.subcategory_id = s.id WHERE p.id = ?", (prod_id,))
+        c.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
+        cat_row = c.fetchone()
+        c.execute("SELECT id, name FROM subcategories WHERE category_id = ?", (cat_id,))
+        subs = c.fetchall()
+        conn.close()
+
+        cat_name = cat_row["name"] if cat_row else "Category"
+        kb = []
+        for s in subs:
+            kb.append([InlineKeyboardButton(f"📁 {s['name']}", callback_data=f"admm_sub_{s['id']}")])
+        kb.append([InlineKeyboardButton(f"➕ Add New Brand in {cat_name}", callback_data=f"admm_add_sub_{cat_id}")])
+        kb.append([InlineKeyboardButton(f"✏️ Rename Category", callback_data=f"admm_ren_cat_{cat_id}"), InlineKeyboardButton(f"🗑️ Delete Category", callback_data=f"admm_del_cat_{cat_id}")])
+        kb.append([InlineKeyboardButton("< Back", callback_data="adm_buttons_menu")])
+        await query.edit_message_text(f"📁 <b>{cat_name}</b>\nনিচের ব্র্যান্ড বা সেকশন নির্বাচন করুন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # Brand Selected -> Show Variants / Products under this Brand
+    if data.startswith("admm_sub_"):
+        sub_id = int(data.split("_")[2])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT s.name as sub_name, s.category_id, c.name as cat_name FROM subcategories s JOIN categories c ON s.category_id = c.id WHERE s.id = ?", (sub_id,))
+        meta = c.fetchone()
+        c.execute("SELECT id, name, price_bdt FROM products WHERE subcategory_id = ?", (sub_id,))
+        prods = c.fetchall()
+        conn.close()
+
+        sub_name = meta["sub_name"] if meta else "Section"
+        kb = []
+        for p in prods:
+            kb.append([InlineKeyboardButton(f"📦 {p['name']} ({p['price_bdt']:.0f} Tk)", callback_data=f"admm_prod_{p['id']}")])
+        kb.append([InlineKeyboardButton(f"➕ Add New Variant / Plan", callback_data=f"admm_add_prod_{sub_id}")])
+        kb.append([InlineKeyboardButton(f"✏️ Rename Brand", callback_data=f"admm_ren_sub_{sub_id}"), InlineKeyboardButton(f"🗑️ Delete Brand", callback_data=f"admm_del_sub_{sub_id}")])
+        back_cat = meta["category_id"] if meta else 1
+        kb.append([InlineKeyboardButton("< Back", callback_data=f"admm_cat_{back_cat}")])
+        await query.edit_message_text(f"📦 <b>{meta['cat_name']} ➔ {sub_name}</b>\nভ্যারিয়েন্টের বিবরণ বা দাম পরিবর্তন করতে নিচের অপশন বেছে নিন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # Specific Variant Selected -> View Full Details & Edit Options
+    if data.startswith("admm_prod_"):
+        prod_id = int(data.split("_")[2])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT p.*, s.name as sub_name, s.category_id FROM products p JOIN subcategories s ON p.subcategory_id = s.id WHERE p.id = ?", (prod_id,))
         p = c.fetchone()
         conn.close()
+
+        photo_status = "🖼️ নিজস্ব ছবি সেট করা আছে" if p["image_file_id"] else "⚪ কোনো ছবি নেই (ক্লিন টেক্সট)"
+        desc_txt = p["description"] if p["description"] else "কোনো কাস্টম বিবরণ দেওয়া নেই"
         txt = (
-            f"🏷️ <b>{p['sub_name']} — {p['name']}</b>\n"
-            f"💰 বর্তমান দাম: <b>{p['price_bdt']:.2f} BDT</b> ({p['price_usdt']:.4f} USDT)\n\n"
+            f"📦 <b>{p['sub_name']} — {p['name']}</b>\n"
+            f"─────────────────────────────\n"
+            f"💰 <b>বর্তমান দাম:</b> {p['price_bdt']:.2f} BDT ({p['price_usdt']:.4f} USDT)\n"
+            f"📸 <b>ফটো স্ট্যাটাস:</b> {photo_status}\n"
+            f"📝 <b>কাস্টম টেক্সট/বিবরণ:</b>\n<i>{desc_txt}</i>\n\n"
             f"কী পরিবর্তন করতে চান?"
         )
         kb = [
-            [InlineKeyboardButton("💰 Change Price (BDT)", callback_data=f"adm_chgprice_{p['id']}")],
-            [InlineKeyboardButton("✏️ Rename Variant", callback_data=f"adm_rename_{p['id']}")],
-            [InlineKeyboardButton("🗑️ Delete Product", callback_data=f"adm_delprod_{p['id']}")],
-            [InlineKeyboardButton("< Back", callback_data="adm_buttons_menu")],
+            [InlineKeyboardButton("💰 Edit Price (BDT)", callback_data=f"adm_chgprice_{p['id']}")],
+            [InlineKeyboardButton("✏️ Edit Variant Name", callback_data=f"adm_rename_{p['id']}")],
+            [InlineKeyboardButton("📝 Edit Custom Text / Description", callback_data=f"admm_edit_desc_{p['id']}")],
+            [InlineKeyboardButton("📸 Change / Set Photo", callback_data=f"adm_setphoto_{p['id']}")],
+            [InlineKeyboardButton("🗑️ Delete Variant", callback_data=f"adm_delprod_{p['id']}")],
+            [InlineKeyboardButton("< Back", callback_data=f"admm_sub_{p['subcategory_id']}")],
         ]
         await query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    # Variant Price, Rename, Description, Delete actions
     if data.startswith("adm_chgprice_"):
         prod_id = int(data.split("_")[2])
         set_user_state(user_id, "ADMIN_WAITING_PRICE", {"prod_id": prod_id})
@@ -1654,7 +1710,13 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
     if data.startswith("adm_rename_"):
         prod_id = int(data.split("_")[2])
         set_user_state(user_id, "ADMIN_WAITING_NAME", {"prod_id": prod_id})
-        await query.message.reply_text("নতুন নাম বা মেয়াদ লিখুন (যেমন: 15 Days):")
+        await query.message.reply_text("নতুন নাম বা মেয়াদ লিখুন (যেমন: 15 Days বা 1 GB):")
+        return
+
+    if data.startswith("admm_edit_desc_"):
+        prod_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_DESC", {"prod_id": prod_id})
+        await query.message.reply_text("📝 এই প্রোডাক্ট কার্ডে প্রদর্শনের জন্য যে বিবরণ বা নির্দেশিকা টেক্সট দিতে চান, তা লিখে পাঠান:")
         return
 
     if data.startswith("adm_delprod_"):
@@ -1664,7 +1726,61 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         c.execute("DELETE FROM products WHERE id = ?", (prod_id,))
         conn.commit()
         conn.close()
-        await query.edit_message_text("✅ প্রোডাক্টটি সফলভাবে মুছে ফেলা হয়েছে।")
+        await query.edit_message_text("✅ ভ্যারিয়েন্টটি সফলভাবে মুছে ফেলা হয়েছে।")
+        return
+
+    # Add New Variant Prompt
+    if data.startswith("admm_add_prod_"):
+        sub_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_NEW_PROD_NAME", {"sub_id": sub_id})
+        await query.message.reply_text("➕ <b>নতুন ভ্যারিয়েন্ট যোগ:</b>\nভ্যারিয়েন্টের নাম বা মেয়াদ লিখুন (যেমন: 10 Days বা 500 MB):", parse_mode=ParseMode.HTML)
+        return
+
+    # Add New Brand / Subcategory Prompt
+    if data.startswith("admm_add_sub_"):
+        cat_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_NEW_SUB_NAME", {"cat_id": cat_id})
+        await query.message.reply_text("➕ <b>নতুন ব্র্যান্ড / সেকশন যোগ:</b>\nব্র্যান্ডের নাম লিখুন (যেমন: Privado VPN বা Star Proxy):", parse_mode=ParseMode.HTML)
+        return
+
+    # Add New Category Prompt
+    if data == "admm_add_cat":
+        set_user_state(user_id, "ADMIN_WAITING_NEW_CAT_NAME", {})
+        await query.message.reply_text("➕ <b>নতুন ক্যাটাগরি তৈরি:</b>\nক্যাটাগরির নাম লিখুন (যেমন: 🎮 Gaming Services):", parse_mode=ParseMode.HTML)
+        return
+
+    # Rename & Delete Brand
+    if data.startswith("admm_ren_sub_"):
+        sub_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_REN_SUB", {"sub_id": sub_id})
+        await query.message.reply_text("ব্র্যান্ডের নতুন নাম লিখুন:")
+        return
+
+    if data.startswith("admm_del_sub_"):
+        sub_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM subcategories WHERE id = ?", (sub_id,))
+        conn.commit()
+        conn.close()
+        await query.edit_message_text("✅ ব্র্যান্ডটি সফলভাবে মুছে ফেলা হয়েছে।")
+        return
+
+    # Rename & Delete Category
+    if data.startswith("admm_ren_cat_"):
+        cat_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_REN_CAT", {"cat_id": cat_id})
+        await query.message.reply_text("ক্যাটাগরির নতুন নাম লিখুন:")
+        return
+
+    if data.startswith("admm_del_cat_"):
+        cat_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+        conn.commit()
+        conn.close()
+        await query.edit_message_text("✅ ক্যাটাগরিটি মুছে ফেলা হয়েছে।")
         return
 
     # Pending Deposits View
@@ -1748,6 +1864,31 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         await query.message.reply_text(stat_text, parse_mode=ParseMode.HTML)
         return
 
+    # Dedicated Payment Methods Editor (bKash, Nagad, Binance, USDT Rate)
+    if data == "adm_payment_methods":
+        bkash = get_setting("bkash_number")
+        nagad = get_setting("nagad_number")
+        binance = get_setting("binance_id")
+        rate = get_setting("usdt_rate", "125.0")
+        text = (
+            f"💳 <b>পেমেন্ট মেথড কন্ট্রোল ও এডিটর:</b>\n"
+            f"─────────────────────────────\n"
+            f"📱 <b>bKash Personal:</b> <code>{bkash}</code>\n"
+            f"📱 <b>Nagad Personal:</b> <code>{nagad}</code>\n"
+            f"💎 <b>Binance Info:</b> <code>{binance}</code>\n"
+            f"💵 <b>USDT Rate:</b> 1 USDT = {rate} BDT\n\n"
+            f"যেটি পরিবর্তন করতে চান, নিচের বাটনটিতে চাপ দিন:"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Edit bKash Number", callback_data="adm_set_bkash")],
+            [InlineKeyboardButton("✏️ Edit Nagad Number", callback_data="adm_set_nagad")],
+            [InlineKeyboardButton("✏️ Edit Binance Pay ID / USDT", callback_data="adm_set_binance")],
+            [InlineKeyboardButton("💵 Edit USDT Exchange Rate", callback_data="adm_set_rate")],
+            [InlineKeyboardButton("< Back to Dashboard", callback_data="adm_root")],
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
     # Settings
     if data == "adm_settings":
         rate = get_setting("usdt_rate", "125.0")
@@ -1799,6 +1940,19 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
     if data == "adm_set_binance":
         set_user_state(user_id, "ADMIN_WAITING_BINANCE", {})
         await query.message.reply_text("নতুন বাইনান্স পে আইডি বা USDT অ্যাড্রেস লিখুন:")
+        return
+
+    # Interactive Balance Buttons Handlers
+    if data.startswith("adm_user_addbal_"):
+        target_uid = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_ADDBAL_AMT", {"target_uid": target_uid})
+        await query.message.reply_text(f"💰 ইউজার <code>{target_uid}</code>-এর একাউন্টে কত টাকা যোগ করতে চান লিখুন (যেমন: 100):", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("adm_user_dedbal_"):
+        target_uid = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_DEDBAL_AMT", {"target_uid": target_uid})
+        await query.message.reply_text(f"💸 ইউজার <code>{target_uid}</code>-এর একাউন্ট থেকে কত টাকা কাটতে চান লিখুন (যেমন: 50):", parse_mode=ParseMode.HTML)
         return
 
     # Deposit Approval / Rejection
@@ -2072,6 +2226,136 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"✅ ভ্যারিয়েন্টের নাম পরিবর্তন করা হয়েছে: {text}")
         return
 
+    # Admin State: Description edit
+    if state == "ADMIN_WAITING_DESC":
+        prod_id = sdata.get("prod_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE products SET description = ? WHERE id = ?", (text, prod_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text("✅ এই প্রোডাক্টটির কাস্টম টেক্সট/বিবরণ সফলভাবে সেভ করা হয়েছে!")
+        return
+
+    # Admin State: Add New Variant
+    if state == "ADMIN_WAITING_NEW_PROD_NAME":
+        sdata["name"] = text
+        set_user_state(user.id, "ADMIN_WAITING_NEW_PROD_PRICE", sdata)
+        await update.message.reply_text(f"ভ্যারিয়েন্ট: <b>{text}</b>\nএবার এর প্রতি পিসের BDT দাম কত হবে তা সংখ্যায় লিখুন (যেমন: 25):", parse_mode=ParseMode.HTML)
+        return
+
+    if state == "ADMIN_WAITING_NEW_PROD_PRICE":
+        try:
+            price_bdt = float(text)
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন (যেমন: 25):")
+            return
+        sub_id = sdata.get("sub_id")
+        v_name = sdata.get("name")
+        rate = float(get_setting("usdt_rate", "125.0"))
+        price_usdt = price_bdt / rate if rate > 0 else 0.0
+
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT c.name as cat_name FROM subcategories s JOIN categories c ON s.category_id = c.id WHERE s.id = ?", (sub_id,))
+        row = c.fetchone()
+        is_vpn = bool(row and "VPN" in row["cat_name"])
+        is_on_demand = 1 if is_vpn else 0
+
+        c.execute(
+            "INSERT INTO products (subcategory_id, name, price_bdt, price_usdt, is_on_demand) VALUES (?, ?, ?, ?, ?)",
+            (sub_id, v_name, price_bdt, price_usdt, is_on_demand),
+        )
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"🎉 <b>নতুন ভ্যারিয়েন্ট সফলভাবে তৈরি হয়েছে!</b>\n📦 নাম: {v_name}\n💰 দাম: {price_bdt:.2f} BDT ({price_usdt:.4f} USDT)", parse_mode=ParseMode.HTML)
+        return
+
+    # Admin State: Add New Subcategory / Brand
+    if state == "ADMIN_WAITING_NEW_SUB_NAME":
+        cat_id = sdata.get("cat_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT INTO subcategories (category_id, name) VALUES (?, ?)", (cat_id, text))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ নতুন ব্র্যান্ড/সেকশন <b>{text}</b> সফলভাবে তৈরি হয়েছে!", parse_mode=ParseMode.HTML)
+        return
+
+    # Admin State: Add New Category
+    if state == "ADMIN_WAITING_NEW_CAT_NAME":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT INTO categories (name, icon) VALUES (?, '🛍️')", (text,))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ নতুন ক্যাটাগরি <b>{text}</b> তৈরি সম্পন্ন হয়েছে!", parse_mode=ParseMode.HTML)
+        return
+
+    # Admin State: Rename Subcategory / Category
+    if state == "ADMIN_WAITING_REN_SUB":
+        sub_id = sdata.get("sub_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE subcategories SET name = ? WHERE id = ?", (text, sub_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ব্র্যান্ডের নাম পরিবর্তন হয়েছে: {text}")
+        return
+
+    if state == "ADMIN_WAITING_REN_CAT":
+        cat_id = sdata.get("cat_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE categories SET name = ? WHERE id = ?", (text, cat_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ক্যাটাগরির নাম পরিবর্তন হয়েছে: {text}")
+        return
+
+    # Admin State: Interactive Balance Add / Deduct
+    if state == "ADMIN_WAITING_ADDBAL_AMT":
+        try:
+            amt = float(text)
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন:")
+            return
+        t_id = sdata.get("target_uid")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance_bdt = balance_bdt + ? WHERE user_id = ?", (amt, t_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ইউজার <code>{t_id}</code>-এর অ্যাকাউন্টে <b>{amt:.2f} BDT</b> যোগ করা হয়েছে!", parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.send_message(chat_id=t_id, text=f"🎉 আপনার অ্যাকাউন্টে {amt:.2f} BDT এডমিন কর্তৃক যোগ করা হয়েছে!")
+        except Exception:
+            pass
+        return
+
+    if state == "ADMIN_WAITING_DEDBAL_AMT":
+        try:
+            amt = float(text)
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন:")
+            return
+        t_id = sdata.get("target_uid")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance_bdt = MAX(0, balance_bdt - ?) WHERE user_id = ?", (amt, t_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ইউজার <code>{t_id}</code>-এর অ্যাকাউন্ট থেকে <b>{amt:.2f} BDT</b> কেটে নেওয়া হয়েছে!", parse_mode=ParseMode.HTML)
+        return
+
     if state == "ADMIN_WAITING_RATE":
         try:
             new_rate = float(text)
@@ -2126,18 +2410,30 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         spent = stats["spent"] or 0.0
+        contact_url = f"https://t.me/{u['username']}" if u['username'] else f"tg://user?id={u['user_id']}"
         info = (
-            f"👤 <b>User Information:</b>\n"
-            f"আইডি: <code>{u['user_id']}</code>\n"
-            f"নাম: {u['name']}\n"
-            f"ইউজারনেম: @{u['username'] if u['username'] else 'N/A'}\n"
-            f"বর্তমান ব্যালেন্স: <b>{u['balance_bdt']:.2f} BDT</b>\n"
-            f"মোট কেনাকাটা: {stats['cnt']} টি ({spent:.2f} BDT)\n"
-            f"জয়েনিং তারিখ: {u['joined_date']}\n\n"
-            f"ব্যালেন্স বাড়াতে: <code>/addbalance {u['user_id']} 100</code>\n"
-            f"ব্যালেন্স কাটতে: <code>/deductbalance {u['user_id']} 50</code>"
+            f"👤 <b>ইউজার প্রোফাইল বিবরণ:</b>\n"
+            f"─────────────────────────────\n"
+            f"🆔 <b>আইডি:</b> <code>{u['user_id']}</code>\n"
+            f"👤 <b>নাম:</b> {u['name']}\n"
+            f"💬 <b>ইউজারনেম:</b> @{u['username'] if u['username'] else 'None'}\n"
+            f"💰 <b>বর্তমান ব্যালেন্স:</b> <b>{u['balance_bdt']:.2f} BDT</b>\n"
+            f"🛍️ <b>মোট কেনাকাটা:</b> {stats['cnt']} টি ({spent:.2f} BDT)\n"
+            f"📅 <b>জয়েনিং তারিখ:</b> {u['joined_date']}\n"
         )
-        await update.message.reply_text(info, parse_mode=ParseMode.HTML)
+        ukb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("➕ Add Balance", callback_data=f"adm_user_addbal_{u['user_id']}"),
+                InlineKeyboardButton("➖ Deduct Balance", callback_data=f"adm_user_dedbal_{u['user_id']}"),
+            ],
+            [
+                InlineKeyboardButton("💬 Contact User (Direct Chat)", url=contact_url),
+            ],
+            [
+                InlineKeyboardButton("< Back", callback_data="adm_root"),
+            ]
+        ])
+        await update.message.reply_text(info, parse_mode=ParseMode.HTML, reply_markup=ukb)
         return
 
 async def photo_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
