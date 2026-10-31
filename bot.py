@@ -10,6 +10,8 @@
 import os
 import sys
 import io
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
 import json
 import logging
@@ -48,8 +50,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DigitalStoreBot")
 
-BOT_TOKEN = "8656707191:AAEvGFT1_x3C3Tdpd2uV-o38atxxsX7HY54"
-SUPER_ADMIN_ID = 8919985167
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8656707191:AAEqK_Dn6M_OhFP12ATl6g5WyNCY02Db_sk")
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8919985167"))
 DB_FILE = "store_database.db"
 
 # High-resolution placeholder/official brand banners for rich cards
@@ -1710,11 +1712,33 @@ async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         await update.message.reply_text(f"ভুল হয়েছে: {e}")
 
+
+# ------------------------------------------------------------------------------
+# RENDER WEB SERVICE HEALTH CHECK SERVER (Keeps Render Free Web Service Active)
+# ------------------------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"CyberNest Telegram Bot is Active and Polling!")
+
+    def log_message(self, format, *args):
+        # Suppress noisy HTTP polling logs in Render console
+        pass
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
 # ------------------------------------------------------------------------------
 # 11. APPLICATION INITIALIZATION & RUNNER
 # ------------------------------------------------------------------------------
 def main():
     print("=" * 60)
+    print("Starting Render Web Service Health Check Server...")
+    threading.Thread(target=start_health_server, daemon=True).start()
     print("Initializing Database...")
     init_db()
     print("Database Initialized Successfully.")
