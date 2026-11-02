@@ -394,6 +394,53 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: Purge legacy intermediate 'Accounts' and 'Recovery Accounts' subcategories
+    try:
+        cursor.execute("SELECT id FROM subcategories WHERE name IN ('Accounts', 'Recovery Accounts')")
+        bad_subs = cursor.fetchall()
+        if bad_subs:
+            bad_ids = [r["id"] for r in bad_subs]
+            placeholders = ",".join(["?"] * len(bad_ids))
+            cursor.execute(f"DELETE FROM stock WHERE product_id IN (SELECT id FROM products WHERE subcategory_id IN ({placeholders}))", bad_ids)
+            cursor.execute(f"DELETE FROM products WHERE subcategory_id IN ({placeholders})", bad_ids)
+            cursor.execute(f"DELETE FROM subcategories WHERE id IN ({placeholders})", bad_ids)
+            conn.commit()
+            logger.info(f"Purged legacy subcategories: {bad_ids}")
+    except Exception as e:
+        logger.warning(f"Migration purge notice: {e}")
+
+    # Ensure direct subcategories exist under Mail
+    try:
+        cursor.execute("SELECT id FROM categories WHERE name LIKE '%Mail%' AND name NOT LIKE '%Recovery%' LIMIT 1")
+        m_row = cursor.fetchone()
+        if m_row:
+            m_id = m_row["id"]
+            for sname, srate in [("Hotmail", 0.65), ("Outlook", 0.68), ("FR Outlook", 0.87)]:
+                cursor.execute("SELECT id FROM subcategories WHERE category_id = ? AND name = ?", (m_id, sname))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO subcategories (category_id, name, position) VALUES (?, ?, 0)", (m_id, sname))
+                    s_id = cursor.lastrowid
+                    cursor.execute("INSERT INTO products (subcategory_id, name, price_bdt, price_usdt, is_on_demand) VALUES (?, ?, ?, ?, 0)", (s_id, sname, srate, srate / 125.0))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Mail subcategory check notice: {e}")
+
+    # Ensure direct subcategories exist under Recovery Added Mail
+    try:
+        cursor.execute("SELECT id FROM categories WHERE name LIKE '%Recovery%Mail%' LIMIT 1")
+        r_row = cursor.fetchone()
+        if r_row:
+            r_id = r_row["id"]
+            for sname, srate in [("Recovery Hotmail", 0.95), ("Recovery Outlook", 0.95), ("Recovery FR Outlook", 1.20)]:
+                cursor.execute("SELECT id FROM subcategories WHERE category_id = ? AND name = ?", (r_id, sname))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO subcategories (category_id, name, position) VALUES (?, ?, 0)", (r_id, sname))
+                    s_id = cursor.lastrowid
+                    cursor.execute("INSERT INTO products (subcategory_id, name, price_bdt, price_usdt, is_on_demand) VALUES (?, ?, ?, ?, 0)", (s_id, sname, srate, srate / 125.0))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Recovery subcategory check notice: {e}")
+
     conn.commit()
 
     # Seed Default Settings
@@ -1800,7 +1847,7 @@ async def process_order(query, prod_id: int, quantity: int):
             pass
         return
 
-    # If out of stock -> Manual Delivery Order Created
+    # If out of stock / On-demand -> Create Pending Order with Full Notifications & PDF Receipt
     c.execute("UPDATE users SET balance_bdt = balance_bdt - ? WHERE user_id = ?", (total_bdt, user_id))
     c.execute("""
     INSERT INTO orders (receipt_no, user_id, product_id, product_name, category_name, quantity, unit_price, total_bdt, total_usdt, status, order_date, day_of_week)
@@ -1810,15 +1857,46 @@ async def process_order(query, prod_id: int, quantity: int):
     conn.commit()
     conn.close()
 
-    await query.message.reply_text(
-        f"⚠️ <b>এই প্রোডাক্টের স্টক বর্তমানে খালি রয়েছে।</b>\n"
-        f"এডমিন খুব শীঘ্রই আপনার অর্ডারটি ম্যানুয়ালি ইনবক্সে ডেলিভারি পাঠাবে।\n\n"
-        f"🧾 <b>Receipt:</b> <code>{receipt_no}</code>\n"
-        f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
-        f"💰 <b>কেটে নেওয়া হয়েছে:</b> {total_bdt:.2f} BDT",
-        parse_mode=ParseMode.HTML,
-    )
+    bot_info = await query.bot.get_me()
 
+    # 1. Send Official Order Confirmation Card to Customer
+    confirm_msg = (
+        f"🎉 <b>আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে!</b>\n"
+        f"─────────────────────────────\n"
+        f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
+        f"🛡️ <b>প্রোডাক্ট:</b> {full_product_name}\n"
+        f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মোট পরিশোধ:</b> {format_price(total_bdt)} BDT\n"
+        f"📅 <b>তারিখ:</b> {now_str} ({day_name})\n"
+        f"─────────────────────────────\n"
+        f"⏳ <b>ডেলিভারি সময়:</b> আগামী ১৫ থেকে ৩০ মিনিটের মধ্যে এডমিন আপনার ইনবক্সে সার্ভিসটি ডেলিভারি পাঠাবে।"
+    )
+    await query.message.reply_text(confirm_msg, parse_mode=ParseMode.HTML)
+
+    # 2. Attach Official PDF Receipt with Scannable QR Code to Customer
+    try:
+        pdf_bio = generate_pdf_receipt(
+            receipt_no=receipt_no,
+            date_str=now_str,
+            day_name=day_name,
+            customer_name=user_name,
+            telegram_id=user_id,
+            username=username,
+            item_desc=full_product_name,
+            category_name=prod["cat_name"],
+            qty=quantity,
+            unit_price=prod["price_bdt"],
+            total_bdt=total_bdt,
+            bot_username=bot_info.username,
+        )
+        await query.message.reply_document(
+            document=InputFile(pdf_bio, filename=f"Receipt_{receipt_no}.pdf"),
+            caption=f"🧾 <b>Official Payment Receipt:</b> <code>{receipt_no}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error(f"Error generating PDF receipt for pending order: {e}")
+
+    # 3. Alert Super Admin with Action Buttons
     adm_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🚀 Deliver Order #{order_id}", callback_data=f"adm_fulfill_{order_id}")],
         [InlineKeyboardButton(f"❌ Cancel & Refund #{order_id}", callback_data=f"adm_refund_{order_id}")]
@@ -1827,17 +1905,21 @@ async def process_order(query, prod_id: int, quantity: int):
         await query.bot.send_message(
             chat_id=SUPER_ADMIN_ID,
             text=(
-                f"🔔 <b>নতুন ম্যানুয়াল অর্ডার প্রয়োজন! (স্টক নেই)</b>\n"
-                f"🧾 Receipt: <code>{receipt_no}</code> (Order #{order_id})\n"
-                f"👤 কাস্টমার: {user_name} (ID: <code>{user_id}</code>)\n"
-                f"📦 প্রোডাক্ট: {full_product_name}\n"
-                f"🔢 পরিমাণ: {quantity} টি | মূল্য: {total_bdt:.2f} BDT"
+                f"🔔 <b>নতুন ম্যানুয়াল অর্ডার প্রয়োজন!</b>\n"
+                f"─────────────────────────────\n"
+                f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
+                f"👤 <b>কাস্টমার:</b> {user_name} (ID: <code>{user_id}</code>)\n"
+                f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
+                f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মূল্য:</b> {format_price(total_bdt)} BDT\n"
+                f"📅 <b>সময়:</b> {now_str}\n"
+                f"─────────────────────────────\n"
+                f"👇 ডেলিভারি দিতে নিচের বাটনে চাপুন:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=adm_kb,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Error alerting admin for order #{order_id}: {e}")
 
 # ------------------------------------------------------------------------------
 # 9. ADMIN PANEL (4-TIER NESTED MENUS FOR STOCK, BUTTONS, PHOTOS, USERS)
