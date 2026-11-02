@@ -2998,6 +2998,15 @@ async def document_message_handler(update: Update, context: ContextTypes.DEFAULT
 # ------------------------------------------------------------------------------
 # 11. APPLICATION INITIALIZATION & RUNNER
 # ------------------------------------------------------------------------------
+async def post_init(application):
+    global _GLOBAL_BOT_APP, _GLOBAL_EVENT_LOOP
+    _GLOBAL_BOT_APP = application
+    try:
+        _GLOBAL_EVENT_LOOP = asyncio.get_running_loop()
+    except Exception:
+        _GLOBAL_EVENT_LOOP = asyncio.get_event_loop_policy().get_event_loop()
+    logger.info("CyberNest Bot post_init completed successfully.")
+
 def main():
     print("=" * 60)
     print("Starting Render Web Service Health Check Server...")
@@ -3010,9 +3019,15 @@ def main():
     print("=" * 60)
 
     global _GLOBAL_BOT_APP, _GLOBAL_EVENT_LOOP
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+    except Exception:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    _GLOBAL_EVENT_LOOP = loop
+
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     _GLOBAL_BOT_APP = app
-    _GLOBAL_EVENT_LOOP = asyncio.get_event_loop()
 
     # Handlers Registration
     app.add_handler(CommandHandler("start", start_handler))
