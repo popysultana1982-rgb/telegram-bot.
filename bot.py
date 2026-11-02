@@ -528,6 +528,16 @@ def seed_clean_store(conn):
     conn.commit()
 
 # DB Helpers
+def format_price(val: float) -> str:
+    """Formats prices cleanly supporting sub-1 BDT (e.g. 0.87, 0.65) and whole numbers."""
+    if val is None:
+        return "0"
+    if val < 1:
+        return f"{val:.2f}"
+    if val == int(val):
+        return f"{int(val)}"
+    return f"{val:.2f}".rstrip('0').rstrip('.')
+
 def get_setting(key: str, default: str = "") -> str:
     conn = get_db()
     c = conn.cursor()
@@ -1139,7 +1149,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # Step 2 -> Step 3: Brand Selected -> Show Variants / Durations / Sizes
+    # Step 2 -> Step 3: Brand Selected -> Show Variants with Real Stock & Exact Decimal Prices
     if data.startswith("usr_sub_"):
         sub_id = int(data.split("_")[2])
         conn = get_db()
@@ -1151,7 +1161,15 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         WHERE s.id = ?
         """, (sub_id,))
         meta = c.fetchone()
-        c.execute("SELECT id, name, price_bdt, price_usdt FROM products WHERE subcategory_id = ? ORDER BY id ASC", (sub_id,))
+        
+        c.execute("""
+        SELECT p.id, p.name, p.price_bdt, p.price_usdt, p.is_on_demand, COUNT(st.id) as in_stock
+        FROM products p
+        LEFT JOIN stock st ON p.id = st.product_id AND st.is_sold = 0
+        WHERE p.subcategory_id = ?
+        GROUP BY p.id, p.name, p.price_bdt, p.price_usdt, p.is_on_demand
+        ORDER BY p.id ASC
+        """, (sub_id,))
         prods = c.fetchall()
         conn.close()
 
@@ -1159,7 +1177,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         text = f"<b>{title}</b>\n\nনিচের প্ল্যান বা মেয়াদ নির্বাচন করুন:"
         kb = []
         for p in prods:
-            btn_text = f"{p['name']} • {p['price_bdt']:.0f} BDT ({p['price_usdt']:.4f} USDT)"
+            stock_str = "⚡ Instant" if p["is_on_demand"] else f"Stock: {p['in_stock']}"
+            btn_text = f"{p['name']} | {format_price(p['price_bdt'])} BDT | {stock_str}"
             kb.append([InlineKeyboardButton(btn_text, callback_data=f"usr_prod_{p['id']}")])
         back_cat_id = meta["category_id"] if meta else 1
         kb.append([InlineKeyboardButton("< Back", callback_data=f"usr_cat_{back_cat_id}")])
@@ -1506,31 +1525,31 @@ async def show_product_card(query, prod_id: int):
     caption = (
         f"<b>{p['sub_name']} — {p['name']}</b>\n"
         f"─────────────────────────────{desc_part}\n"
-        f"💰 <b>Price:</b> {p['price_bdt']:.2f} BDT / {p['price_usdt']:.4f} USDT per unit\n"
+        f"💰 <b>Price:</b> {format_price(p['price_bdt'])} BDT / {p['price_usdt']:.4f} USDT per unit\n"
         f"📊 <b>Stock:</b> {stock_badge}\n\n"
         f"Select quantity:"
     )
 
     kb = [
         [
-            InlineKeyboardButton(f"1× {p['price_bdt']:.0f} BDT", callback_data=f"qty_{p['id']}_1"),
-            InlineKeyboardButton(f"2× {p['price_bdt']*2:.0f} BDT", callback_data=f"qty_{p['id']}_2"),
+            InlineKeyboardButton(f"1× {format_price(p['price_bdt'])} BDT", callback_data=f"qty_{p['id']}_1"),
+            InlineKeyboardButton(f"2× {format_price(p['price_bdt']*2)} BDT", callback_data=f"qty_{p['id']}_2"),
         ],
         [
-            InlineKeyboardButton(f"3× {p['price_bdt']*3:.0f} BDT", callback_data=f"qty_{p['id']}_3"),
-            InlineKeyboardButton(f"4× {p['price_bdt']*4:.0f} BDT", callback_data=f"qty_{p['id']}_4"),
+            InlineKeyboardButton(f"3× {format_price(p['price_bdt']*3)} BDT", callback_data=f"qty_{p['id']}_3"),
+            InlineKeyboardButton(f"4× {format_price(p['price_bdt']*4)} BDT", callback_data=f"qty_{p['id']}_4"),
         ],
         [
-            InlineKeyboardButton(f"5× {p['price_bdt']*5:.0f} BDT", callback_data=f"qty_{p['id']}_5"),
-            InlineKeyboardButton(f"6× {p['price_bdt']*6:.0f} BDT", callback_data=f"qty_{p['id']}_6"),
+            InlineKeyboardButton(f"5× {format_price(p['price_bdt']*5)} BDT", callback_data=f"qty_{p['id']}_5"),
+            InlineKeyboardButton(f"6× {format_price(p['price_bdt']*6)} BDT", callback_data=f"qty_{p['id']}_6"),
         ],
         [
-            InlineKeyboardButton(f"7× {p['price_bdt']*7:.0f} BDT", callback_data=f"qty_{p['id']}_7"),
-            InlineKeyboardButton(f"8× {p['price_bdt']*8:.0f} BDT", callback_data=f"qty_{p['id']}_8"),
+            InlineKeyboardButton(f"7× {format_price(p['price_bdt']*7)} BDT", callback_data=f"qty_{p['id']}_7"),
+            InlineKeyboardButton(f"8× {format_price(p['price_bdt']*8)} BDT", callback_data=f"qty_{p['id']}_8"),
         ],
         [
-            InlineKeyboardButton(f"9× {p['price_bdt']*9:.0f} BDT", callback_data=f"qty_{p['id']}_9"),
-            InlineKeyboardButton(f"10× {p['price_bdt']*10:.0f} BDT", callback_data=f"qty_{p['id']}_10"),
+            InlineKeyboardButton(f"9× {format_price(p['price_bdt']*9)} BDT", callback_data=f"qty_{p['id']}_9"),
+            InlineKeyboardButton(f"10× {format_price(p['price_bdt']*10)} BDT", callback_data=f"qty_{p['id']}_10"),
         ],
         [InlineKeyboardButton("✏️ Custom Quantity", callback_data=f"custqty_{p['id']}")],
         [InlineKeyboardButton("< Back", callback_data=f"usr_sub_{p['subcategory_id']}")],
@@ -1857,7 +1876,7 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         title = f"{meta['cat_name']} ➔ {meta['sub_name']}" if meta else "Select Variant"
         kb = []
         for p in prods:
-            kb.append([InlineKeyboardButton(f"📦 {p['name']} ({p['price_bdt']:.0f} Tk)", callback_data=f"adm_stk_step4_upload_{p['id']}")])
+            kb.append([InlineKeyboardButton(f"📦 {p['name']} ({format_price(p['price_bdt'])} Tk)", callback_data=f"adm_stk_step4_upload_{p['id']}")])
         back_cat = meta["category_id"] if meta else 1
         kb.append([InlineKeyboardButton("< Back", callback_data=f"adm_stk_step2_sub_{back_cat}")])
         await query.edit_message_text(f"📥 <b>[Add Stock — ধাপ ৩]</b>\n<b>{title}</b> ➔ কোন প্যাকেজ/মেয়াদে স্টক দেবেন সিলেক্ট করুন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
@@ -1922,8 +1941,12 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         if row:
             kb.append(row)
         kb.append([InlineKeyboardButton(f"➕ Add New Brand in {cat_name}", callback_data=f"adm_btn_add_sub_{cat_id}")])
-        kb.append([InlineKeyboardButton("< Back", callback_data="adm_btn_step1_cats")])
-        await query.edit_message_text(f"🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ২]</b>\n<b>{cat_name}</b> ➔ ব্র্যান্ড বা সেকশন বেছে নিন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        kb.append([
+            InlineKeyboardButton(f"✏️ Rename Category", callback_data=f"adm_ren_cat_{cat_id}"),
+            InlineKeyboardButton(f"🗑️ Delete Category", callback_data=f"adm_del_cat_{cat_id}")
+        ])
+        kb.append([InlineKeyboardButton("< Back to Categories", callback_data="adm_btn_step1_cats")])
+        await query.edit_message_text(f"🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ২]</b>\n<b>{cat_name}</b> ➔ ব্র্যান্ড বা সেকশন বেছে নিন (এডিট/ডিলিট করতে ব্র্যান্ডে চাপুন):", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
     # Step 3: Variants / Plans list
@@ -1943,13 +1966,18 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         conn.close()
 
         title = f"{meta['cat_name']} ➔ {meta['sub_name']}" if meta else "Section"
+        brand_name = meta["sub_name"] if meta else "Brand"
         kb = []
         for p in prods:
-            kb.append([InlineKeyboardButton(f"📦 {p['name']} ({p['price_bdt']:.0f} Tk)", callback_data=f"adm_btn_step4_edit_{p['id']}")])
-        kb.append([InlineKeyboardButton(f"➕ Add New Duration / Package", callback_data=f"adm_btn_add_prod_{sub_id}")])
+            kb.append([InlineKeyboardButton(f"📦 {p['name']} ({format_price(p['price_bdt'])} Tk)", callback_data=f"adm_btn_step4_edit_{p['id']}")])
+        kb.append([InlineKeyboardButton(f"➕ Add New Duration / Package in {brand_name}", callback_data=f"adm_btn_add_prod_{sub_id}")])
+        kb.append([
+            InlineKeyboardButton(f"✏️ Rename Brand ({brand_name})", callback_data=f"adm_ren_sub_{sub_id}"),
+            InlineKeyboardButton(f"🗑️ Delete Brand ({brand_name})", callback_data=f"adm_del_sub_{sub_id}")
+        ])
         back_cat = meta["category_id"] if meta else 1
-        kb.append([InlineKeyboardButton("< Back", callback_data=f"adm_btn_step2_sub_{back_cat}")])
-        await query.edit_message_text(f"🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ৩]</b>\n<b>{title}</b> ➔ এডিট করতে নিচের মেয়াদ/সাইজে চাপুন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        kb.append([InlineKeyboardButton("< Back to Brands", callback_data=f"adm_btn_step2_sub_{back_cat}")])
+        await query.edit_message_text(f"🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ৩]</b>\n<b>{title}</b>\n\n• নতুন ভ্যারিয়েন্ট যোগ করতে বা ব্র্যান্ডের নাম পরিবর্তন/ডিলিট করতে নিচের অপশন বেছে নিন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
     # Step 4: Variant Control Card (Price, Rename, Description, Photo, Delete)
@@ -1983,11 +2011,62 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         await query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    # Brand & Category Rename / Delete Callback Handlers
+    if data.startswith("adm_ren_sub_"):
+        sub_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_REN_SUB", {"sub_id": sub_id})
+        await query.message.reply_text("✏️ <b>ব্র্যান্ডের নতুন নাম লিখে পাঠান:</b>\n(যেমন: FR Outlook বা Nord VPN)", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("adm_del_sub_"):
+        sub_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT s.name as sub_name, s.category_id FROM subcategories s WHERE s.id = ?", (sub_id,))
+        sub_row = c.fetchone()
+        if sub_row:
+            cat_id = sub_row["category_id"]
+            c.execute("DELETE FROM stock WHERE product_id IN (SELECT id FROM products WHERE subcategory_id = ?)", (sub_id,))
+            c.execute("DELETE FROM products WHERE subcategory_id = ?", (sub_id,))
+            c.execute("DELETE FROM subcategories WHERE id = ?", (sub_id,))
+            conn.commit()
+            conn.close()
+            await query.message.reply_text(f"🗑️ <b>ব্র্যান্ড '{sub_row['sub_name']}' এবং এর সব প্রোডাক্ট সফলভাবে মুছে ফেলা হয়েছে!</b>", parse_mode=ParseMode.HTML)
+        else:
+            conn.close()
+            await query.message.reply_text("ব্র্যান্ড পাওয়া যায়নি।")
+        return
+
+    if data.startswith("adm_ren_cat_"):
+        cat_id = int(data.split("_")[3])
+        set_user_state(user_id, "ADMIN_WAITING_REN_CAT", {"cat_id": cat_id})
+        await query.message.reply_text("✏️ <b>ক্যাটাগরির নতুন নাম লিখে পাঠান:</b>\n(যেমন: ✉️ Hotmail/Outlook Services)", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("adm_del_cat_"):
+        cat_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
+        cat_row = c.fetchone()
+        if cat_row:
+            c.execute("DELETE FROM stock WHERE product_id IN (SELECT p.id FROM products p JOIN subcategories s ON p.subcategory_id = s.id WHERE s.category_id = ?)", (cat_id,))
+            c.execute("DELETE FROM products WHERE subcategory_id IN (SELECT id FROM subcategories WHERE category_id = ?)", (cat_id,))
+            c.execute("DELETE FROM subcategories WHERE category_id = ?", (cat_id,))
+            c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+            conn.commit()
+            conn.close()
+            await query.message.reply_text(f"🗑️ <b>ক্যাটাগরি '{cat_row['name']}' এবং এর সব ব্র্যান্ড মুছে ফেলা হয়েছে!</b>", parse_mode=ParseMode.HTML)
+        else:
+            conn.close()
+            await query.message.reply_text("ক্যাটাগরি পাওয়া যায়নি।")
+        return
+
     # Actions: Price, Rename, Description, Delete
     if data.startswith("adm_chgprice_"):
         prod_id = int(data.split("_")[2])
         set_user_state(user_id, "ADMIN_WAITING_PRICE", {"prod_id": prod_id})
-        await query.message.reply_text("নতুন BDT দাম লিখুন (যেমন: 25):")
+        await query.message.reply_text("নতুন BDT দাম লিখুন (যেমন: 0.87 বা 0.65 বা 15 — ১ টাকার নিচের যেকোনো দশমিক দিতে পারবেন):")
         return
 
     if data.startswith("adm_rename_"):
@@ -2435,7 +2514,7 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
 
         lines = ["🔔 <b>NEW STOCK ALERT!</b> 🔔", "────────────────────────"]
         for r in rows:
-            lines.append(f"• <b>{r['sub_name']} {r['prod_name']}</b> — {r['cnt']} টি স্টকে আছে (দাম: {r['price_bdt']:.0f} Tk)")
+            lines.append(f"• <b>{r['sub_name']} {r['prod_name']}</b> — {r['cnt']} টি স্টকে আছে (দাম: {format_price(r['price_bdt'])} Tk)")
         lines.append("────────────────────────")
         lines.append("🛍️ দ্রুত কেনাকাটা করতে নিচে /start দিয়ে শপ ওপেন করুন!")
         alert_preview = "\n".join(lines)
@@ -2734,6 +2813,30 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("অর্ডার পাওয়া যায়নি।")
         return
 
+    # Rename Subcategory / Brand
+    if state == "ADMIN_WAITING_REN_SUB":
+        sub_id = sdata.get("sub_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE subcategories SET name = ? WHERE id = ?", (text, sub_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ব্র্যান্ডের নাম সফলভাবে পরিবর্তন হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
+        return
+
+    # Rename Category
+    if state == "ADMIN_WAITING_REN_CAT":
+        cat_id = sdata.get("cat_id")
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE categories SET name = ? WHERE id = ?", (text, cat_id))
+        conn.commit()
+        conn.close()
+        set_user_state(user.id, None)
+        await update.message.reply_text(f"✅ ক্যাটাগরির নাম সফলভাবে পরিবর্তন হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
+        return
+
     # Add Category
     if state == "ADMIN_WAITING_NEW_CAT_NAME":
         conn = get_db()
@@ -2763,7 +2866,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         set_user_state(user.id, "ADMIN_WAITING_ADDPROD_PRICE", sdata)
         await update.message.reply_text(
             f"মেয়াদ/প্যাকেজের নাম: <b>{text}</b>\n\n"
-            f"এবার এর প্রতি পিসের BDT দাম কত হবে তা সংখ্যায় লিখুন (যেমন: 25):",
+            f"এবার এর প্রতি পিসের BDT দাম লিখুন (যেমন: 0.87 বা 0.65 বা 15 — ১ টাকার নিচের দশমিক সংখ্যাও দিতে পারবেন):",
             parse_mode=ParseMode.HTML,
         )
         return
