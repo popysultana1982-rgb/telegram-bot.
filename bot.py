@@ -384,15 +384,24 @@ def init_db():
     )
     """)
 
-    # Ensure position columns exist
-    try:
-        cursor.execute("ALTER TABLE categories ADD COLUMN position INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE subcategories ADD COLUMN position INTEGER DEFAULT 0")
-    except Exception:
-        pass
+    # Ensure columns exist safely with IF NOT EXISTS
+    if conn.is_pg:
+        try:
+            cursor.execute("ALTER TABLE categories ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE subcategories ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE stock ADD COLUMN IF NOT EXISTS stock_type TEXT DEFAULT 'account'")
+        except Exception as e:
+            logger.warning(f"Postgres column check notice: {e}")
+    else:
+        for tbl in ("categories", "subcategories"):
+            try:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN position INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        try:
+            cursor.execute("ALTER TABLE stock ADD COLUMN stock_type TEXT DEFAULT 'account'")
+        except Exception:
+            pass
 
     # Migration: Purge legacy intermediate 'Accounts' and 'Recovery Accounts' subcategories
     try:
@@ -1723,90 +1732,157 @@ async def show_product_card(query, prod_id: int):
     await query.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
 
 async def process_order(query, prod_id: int, quantity: int):
-    user_id = query.from_user.id
-    user_name = query.from_user.full_name
-    username = query.from_user.username or ""
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-    SELECT p.*, s.name as sub_name, c.name as cat_name
-    FROM products p
-    JOIN subcategories s ON p.subcategory_id = s.id
-    JOIN categories c ON s.category_id = c.id
-    WHERE p.id = ?
-    """, (prod_id,))
-    prod = c.fetchone()
-    c.execute("SELECT balance_bdt FROM users WHERE user_id = ?", (user_id,))
-    user_balance = c.fetchone()["balance_bdt"]
-
-    if not prod:
-        conn.close()
-        await query.message.reply_text("প্রোডাক্ট পাওয়া যায়নি।")
-        return
-
-    total_bdt = prod["price_bdt"] * quantity
-    total_usdt = prod["price_usdt"] * quantity
-
-    if user_balance < total_bdt:
-        conn.close()
-        shortage = total_bdt - user_balance
-        await query.message.reply_text(
-            f"❌ <b>অপর্যাপ্ত ব্যালেন্স!</b>\n\n"
-            f"প্রয়োজনীয় টাকা: {total_bdt:.2f} BDT\n"
-            f"আপনার ব্যালেন্স: {user_balance:.2f} BDT\n"
-            f"ঘাটতি: {shortage:.2f} BDT\n\n"
-            f"দয়া করে নিচের 💳 Deposit মেনু থেকে ব্যালেন্স রিচার্জ করুন।",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    now = datetime.datetime.now()
-    now_str = now.strftime("%Y-%m-%d %I:%M:%S %p")
-    days_bn = {"Monday": "সোমবার", "Tuesday": "মঙ্গলবার", "Wednesday": "বুধবার", "Thursday": "বৃহস্পতিবার", "Friday": "শুক্রবার", "Saturday": "শনিবার", "Sunday": "রবিবার"}
-    day_name = days_bn.get(now.strftime("%A"), now.strftime("%A"))
-    receipt_no = f"RCP-{secrets.token_hex(5).upper()}"
-    full_product_name = f"{prod['sub_name']} ({prod['name']})"
-
-    # Check available stock
-    c.execute("SELECT id, content, stock_type FROM stock WHERE product_id = ? AND is_sold = 0 LIMIT ?", (prod_id, quantity))
-    stock_rows = c.fetchall()
-
-    # If stock is available -> Instant Auto-Delivery
-    if len(stock_rows) >= quantity:
-        c.execute("UPDATE users SET balance_bdt = balance_bdt - ? WHERE user_id = ?", (total_bdt, user_id))
-        stock_ids = [r["id"] for r in stock_rows]
-        items_content = [r["content"] for r in stock_rows]
-        c.execute(
-            f"UPDATE stock SET is_sold = 1, sold_to = ?, sold_at = ? WHERE id IN ({','.join(['?']*len(stock_ids))})",
-            [user_id, now_str] + stock_ids,
-        )
-        delivered_json = json.dumps(items_content)
+    try:
+        user_id = query.from_user.id
+        user_name = query.from_user.full_name
+        username = query.from_user.username or ""
+        conn = get_db()
+        c = conn.cursor()
         c.execute("""
-        INSERT INTO orders (receipt_no, user_id, product_id, product_name, category_name, quantity, unit_price, total_bdt, total_usdt, status, delivered_data, order_date, day_of_week)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
-        """, (receipt_no, user_id, prod_id, full_product_name, prod["cat_name"], quantity, prod["price_bdt"], total_bdt, total_usdt, delivered_json, now_str, day_name))
+        SELECT p.*, s.name as sub_name, c.name as cat_name
+        FROM products p
+        JOIN subcategories s ON p.subcategory_id = s.id
+        JOIN categories c ON s.category_id = c.id
+        WHERE p.id = ?
+        """, (prod_id,))
+        prod = c.fetchone()
+        c.execute("SELECT balance_bdt FROM users WHERE user_id = ?", (user_id,))
+        user_balance = c.fetchone()["balance_bdt"]
+
+        if not prod:
+            conn.close()
+            await query.message.reply_text("প্রোডাক্ট পাওয়া যায়নি।")
+            return
+
+        total_bdt = prod["price_bdt"] * quantity
+        total_usdt = prod["price_usdt"] * quantity
+
+        if user_balance < total_bdt:
+            conn.close()
+            shortage = total_bdt - user_balance
+            await query.message.reply_text(
+                f"❌ <b>অপর্যাপ্ত ব্যালেন্স!</b>\n\n"
+                f"প্রয়োজনীয় টাকা: {total_bdt:.2f} BDT\n"
+                f"আপনার ব্যালেন্স: {user_balance:.2f} BDT\n"
+                f"ঘাটতি: {shortage:.2f} BDT\n\n"
+                f"দয়া করে নিচের 💳 Deposit মেনু থেকে ব্যালেন্স রিচার্জ করুন।",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        now = datetime.datetime.now()
+        now_str = now.strftime("%Y-%m-%d %I:%M:%S %p")
+        days_bn = {"Monday": "সোমবার", "Tuesday": "মঙ্গলবার", "Wednesday": "বুধবার", "Thursday": "বৃহস্পতিবার", "Friday": "শুক্রবার", "Saturday": "শনিবার", "Sunday": "রবিবার"}
+        day_name = days_bn.get(now.strftime("%A"), now.strftime("%A"))
+        receipt_no = f"RCP-{secrets.token_hex(5).upper()}"
+        full_product_name = f"{prod['sub_name']} ({prod['name']})"
+
+        # Check available stock
+        c.execute("SELECT id, content FROM stock WHERE product_id = ? AND is_sold = 0 LIMIT ?", (prod_id, quantity))
+        stock_rows = c.fetchall()
+
+        # If stock is available -> Instant Auto-Delivery
+        if len(stock_rows) >= quantity:
+            c.execute("UPDATE users SET balance_bdt = balance_bdt - ? WHERE user_id = ?", (total_bdt, user_id))
+            stock_ids = [r["id"] for r in stock_rows]
+            items_content = [r["content"] for r in stock_rows]
+            c.execute(
+                f"UPDATE stock SET is_sold = 1, sold_to = ?, sold_at = ? WHERE id IN ({','.join(['?']*len(stock_ids))})",
+                [user_id, now_str] + stock_ids,
+            )
+            delivered_json = json.dumps(items_content)
+            c.execute("""
+            INSERT INTO orders (receipt_no, user_id, product_id, product_name, category_name, quantity, unit_price, total_bdt, total_usdt, status, delivered_data, order_date, day_of_week)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+            """, (receipt_no, user_id, prod_id, full_product_name, prod["cat_name"], quantity, prod["price_bdt"], total_bdt, total_usdt, delivered_json, now_str, day_name))
+            conn.commit()
+            conn.close()
+
+            bot_info = await query.bot.get_me()
+
+            # 1. Send Formatted 1-Tap Copy Credentials Card matching screenshot
+            card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
+            await query.message.reply_text(card_text, parse_mode=ParseMode.HTML)
+
+            # 2. If Mail or bulk items, also attach Excel (.xlsx) file
+            if "MAIL" in prod["cat_name"].upper() or len(items_content) > 1:
+                try:
+                    excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
+                    await query.message.reply_document(
+                        document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
+                        caption=f"📂 <b>Excel Data Backup:</b> <code>{receipt_no}</code>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as e:
+                    logger.warning(f"Error sending excel: {e}")
+
+            # Send Official PDF Receipt
+            try:
+                pdf_bio = generate_pdf_receipt(
+                    receipt_no=receipt_no,
+                    date_str=now_str,
+                    day_name=day_name,
+                    customer_name=user_name,
+                    telegram_id=user_id,
+                    username=username,
+                    item_desc=full_product_name,
+                    category_name=prod["cat_name"],
+                    qty=quantity,
+                    unit_price=prod["price_bdt"],
+                    total_bdt=total_bdt,
+                    bot_username=bot_info.username,
+                )
+                await query.message.reply_document(
+                    document=InputFile(pdf_bio, filename=f"Receipt_{receipt_no}.pdf"),
+                    caption=f"🧾 <b>Official Payment Receipt:</b> <code>{receipt_no}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as e:
+                logger.error(f"Error sending PDF receipt: {e}")
+
+            # Alert Admin
+            try:
+                await query.bot.send_message(
+                    chat_id=SUPER_ADMIN_ID,
+                    text=(
+                        f"🔔 <b>নতুন প্রোডাক্ট সেল হয়েছে!</b>\n"
+                        f"🧾 Receipt: <code>{receipt_no}</code>\n"
+                        f"👤 কাস্টমার: {user_name} (ID: <code>{user_id}</code>)\n"
+                        f"📦 প্রোডাক্ট: {full_product_name}\n"
+                        f"🔢 পরিমাণ: {quantity} টি | মূল্য: {total_bdt:.2f} BDT"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            return
+
+        # If out of stock / On-demand -> Create Pending Order with Full Notifications & PDF Receipt
+        c.execute("UPDATE users SET balance_bdt = balance_bdt - ? WHERE user_id = ?", (total_bdt, user_id))
+        c.execute("""
+        INSERT INTO orders (receipt_no, user_id, product_id, product_name, category_name, quantity, unit_price, total_bdt, total_usdt, status, order_date, day_of_week)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_delivery', ?, ?)
+        """, (receipt_no, user_id, prod_id, full_product_name, prod["cat_name"], quantity, prod["price_bdt"], total_bdt, total_usdt, now_str, day_name))
+        order_id = c.lastrowid
         conn.commit()
         conn.close()
 
         bot_info = await query.bot.get_me()
 
-        # 1. Send Formatted 1-Tap Copy Credentials Card matching screenshot
-        card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
-        await query.message.reply_text(card_text, parse_mode=ParseMode.HTML)
+        # 1. Send Official Order Confirmation Card to Customer
+        confirm_msg = (
+            f"🎉 <b>আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে!</b>\n"
+            f"─────────────────────────────\n"
+            f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
+            f"🛡️ <b>প্রোডাক্ট:</b> {full_product_name}\n"
+            f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মোট পরিশোধ:</b> {format_price(total_bdt)} BDT\n"
+            f"📅 <b>তারিখ:</b> {now_str} ({day_name})\n"
+            f"─────────────────────────────\n"
+            f"⏳ <b>ডেলিভারি সময়:</b> আগামী ১৫ থেকে ৩০ মিনিটের মধ্যে এডমিন আপনার ইনবক্সে সার্ভিসটি ডেলিভারি পাঠাবে।"
+        )
+        await query.message.reply_text(confirm_msg, parse_mode=ParseMode.HTML)
 
-        # 2. If Mail or bulk items, also attach Excel (.xlsx) file
-        if "MAIL" in prod["cat_name"].upper() or len(items_content) > 1:
-            try:
-                excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
-                await query.message.reply_document(
-                    document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
-                    caption=f"📂 <b>Excel Data Backup:</b> <code>{receipt_no}</code>",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception as e:
-                logger.warning(f"Error sending excel: {e}")
-
-        # Send Official PDF Receipt
+        # 2. Attach Official PDF Receipt with Scannable QR Code to Customer
         try:
             pdf_bio = generate_pdf_receipt(
                 receipt_no=receipt_no,
@@ -1828,98 +1904,38 @@ async def process_order(query, prod_id: int, quantity: int):
                 parse_mode=ParseMode.HTML,
             )
         except Exception as e:
-            logger.error(f"Error sending PDF receipt: {e}")
+            logger.error(f"Error generating PDF receipt for pending order: {e}")
 
-        # Alert Admin
+        # 3. Alert Super Admin with Action Buttons
+        adm_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🚀 Deliver Order #{order_id}", callback_data=f"adm_fulfill_{order_id}")],
+            [InlineKeyboardButton(f"❌ Cancel & Refund #{order_id}", callback_data=f"adm_refund_{order_id}")]
+        ])
         try:
             await query.bot.send_message(
                 chat_id=SUPER_ADMIN_ID,
                 text=(
-                    f"🔔 <b>নতুন প্রোডাক্ট সেল হয়েছে!</b>\n"
-                    f"🧾 Receipt: <code>{receipt_no}</code>\n"
-                    f"👤 কাস্টমার: {user_name} (ID: <code>{user_id}</code>)\n"
-                    f"📦 প্রোডাক্ট: {full_product_name}\n"
-                    f"🔢 পরিমাণ: {quantity} টি | মূল্য: {total_bdt:.2f} BDT"
+                    f"🔔 <b>নতুন ম্যানুয়াল অর্ডার প্রয়োজন!</b>\n"
+                    f"─────────────────────────────\n"
+                    f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
+                    f"👤 <b>কাস্টমার:</b> {user_name} (ID: <code>{user_id}</code>)\n"
+                    f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
+                    f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মূল্য:</b> {format_price(total_bdt)} BDT\n"
+                    f"📅 <b>সময়:</b> {now_str}\n"
+                    f"─────────────────────────────\n"
+                    f"👇 ডেলিভারি দিতে নিচের বাটনে চাপুন:"
                 ),
                 parse_mode=ParseMode.HTML,
+                reply_markup=adm_kb,
             )
+        except Exception as e:
+            logger.error(f"Error alerting admin for order #{order_id}: {e}")
+    except Exception as e:
+        logger.error(f"Critical error in process_order: {e}", exc_info=True)
+        try:
+            await query.message.reply_text(f"❌ অর্ডার প্রসেস করতে সাময়িক সমস্যা হয়েছে: {e}")
         except Exception:
             pass
-        return
-
-    # If out of stock / On-demand -> Create Pending Order with Full Notifications & PDF Receipt
-    c.execute("UPDATE users SET balance_bdt = balance_bdt - ? WHERE user_id = ?", (total_bdt, user_id))
-    c.execute("""
-    INSERT INTO orders (receipt_no, user_id, product_id, product_name, category_name, quantity, unit_price, total_bdt, total_usdt, status, order_date, day_of_week)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_delivery', ?, ?)
-    """, (receipt_no, user_id, prod_id, full_product_name, prod["cat_name"], quantity, prod["price_bdt"], total_bdt, total_usdt, now_str, day_name))
-    order_id = c.lastrowid
-    conn.commit()
-    conn.close()
-
-    bot_info = await query.bot.get_me()
-
-    # 1. Send Official Order Confirmation Card to Customer
-    confirm_msg = (
-        f"🎉 <b>আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে!</b>\n"
-        f"─────────────────────────────\n"
-        f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
-        f"🛡️ <b>প্রোডাক্ট:</b> {full_product_name}\n"
-        f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মোট পরিশোধ:</b> {format_price(total_bdt)} BDT\n"
-        f"📅 <b>তারিখ:</b> {now_str} ({day_name})\n"
-        f"─────────────────────────────\n"
-        f"⏳ <b>ডেলিভারি সময়:</b> আগামী ১৫ থেকে ৩০ মিনিটের মধ্যে এডমিন আপনার ইনবক্সে সার্ভিসটি ডেলিভারি পাঠাবে।"
-    )
-    await query.message.reply_text(confirm_msg, parse_mode=ParseMode.HTML)
-
-    # 2. Attach Official PDF Receipt with Scannable QR Code to Customer
-    try:
-        pdf_bio = generate_pdf_receipt(
-            receipt_no=receipt_no,
-            date_str=now_str,
-            day_name=day_name,
-            customer_name=user_name,
-            telegram_id=user_id,
-            username=username,
-            item_desc=full_product_name,
-            category_name=prod["cat_name"],
-            qty=quantity,
-            unit_price=prod["price_bdt"],
-            total_bdt=total_bdt,
-            bot_username=bot_info.username,
-        )
-        await query.message.reply_document(
-            document=InputFile(pdf_bio, filename=f"Receipt_{receipt_no}.pdf"),
-            caption=f"🧾 <b>Official Payment Receipt:</b> <code>{receipt_no}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logger.error(f"Error generating PDF receipt for pending order: {e}")
-
-    # 3. Alert Super Admin with Action Buttons
-    adm_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🚀 Deliver Order #{order_id}", callback_data=f"adm_fulfill_{order_id}")],
-        [InlineKeyboardButton(f"❌ Cancel & Refund #{order_id}", callback_data=f"adm_refund_{order_id}")]
-    ])
-    try:
-        await query.bot.send_message(
-            chat_id=SUPER_ADMIN_ID,
-            text=(
-                f"🔔 <b>নতুন ম্যানুয়াল অর্ডার প্রয়োজন!</b>\n"
-                f"─────────────────────────────\n"
-                f"🧾 <b>অর্ডার নম্বর:</b> #{order_id} (Receipt: <code>{receipt_no}</code>)\n"
-                f"👤 <b>কাস্টমার:</b> {user_name} (ID: <code>{user_id}</code>)\n"
-                f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
-                f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মূল্য:</b> {format_price(total_bdt)} BDT\n"
-                f"📅 <b>সময়:</b> {now_str}\n"
-                f"─────────────────────────────\n"
-                f"👇 ডেলিভারি দিতে নিচের বাটনে চাপুন:"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=adm_kb,
-        )
-    except Exception as e:
-        logger.error(f"Error alerting admin for order #{order_id}: {e}")
 
 # ------------------------------------------------------------------------------
 # 9. ADMIN PANEL (4-TIER NESTED MENUS FOR STOCK, BUTTONS, PHOTOS, USERS)
