@@ -435,6 +435,30 @@ def init_db():
     except Exception as e:
         logger.warning(f"Migration purge notice: {e}")
 
+    # Auto-seed 5 test proxies for 9 Proxy 100 MB if stock is empty
+    try:
+        cursor.execute("SELECT id FROM products WHERE name LIKE '%100 MB%' LIMIT 1")
+        p_100 = cursor.fetchone()
+        if p_100:
+            p100_id = p_100["id"]
+            cursor.execute("SELECT COUNT(*) as cnt FROM stock WHERE product_id = ? AND is_sold = 0", (p100_id,))
+            scnt = cursor.fetchone()
+            sc = scnt["cnt"] if isinstance(scnt, dict) else scnt[0]
+            if sc == 0:
+                test_proxies = [
+                    "node01.niceproxy.io:18520:cyber_test01_user:kX9_qW72mP",
+                    "node02.niceproxy.io:18521:cyber_test02_user:vL4_mR83tQ",
+                    "node03.niceproxy.io:18522:cyber_test03_user:zT8_pY44wN",
+                    "node04.niceproxy.io:18523:cyber_test04_user:bM2_rL91kS",
+                    "node05.niceproxy.io:18524:cyber_test05_user:jD6_wK55vH",
+                ]
+                for prx in test_proxies:
+                    cursor.execute("INSERT INTO stock (product_id, content, is_sold, stock_type) VALUES (?, ?, 0, 'proxy')", (p100_id, prx))
+                conn.commit()
+                logger.info("Auto-seeded 5 test proxies for 9 Proxy 100 MB.")
+    except Exception as e:
+        logger.warning(f"Test proxy seeding notice: {e}")
+
     # Ensure direct subcategories exist under Mail
     try:
         cursor.execute("SELECT id FROM categories WHERE name LIKE '%Mail%' AND name NOT LIKE '%Recovery%' LIMIT 1")
@@ -724,7 +748,7 @@ def generate_excel_delivery(items: List[str], product_name: str, receipt_no: str
         bottom=Side(style='thin', color='D9D9D9')
     )
 
-    headers = ["SL", "Product / Variant", "Credential / Session / Key Data", "Delivery Date"]
+    headers = ["SL", "Product", "Email / Username", "Password", "Token / Session / Key", "Full Raw String", "Delivery Date"]
     ws.append(headers)
     for col_num in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_num)
@@ -734,20 +758,28 @@ def generate_excel_delivery(items: List[str], product_name: str, receipt_no: str
 
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     for idx, item in enumerate(items, start=1):
-        row_data = [idx, product_name, item, now_str]
+        delim = "|" if "|" in item else ":"
+        parts = [p.strip() for p in item.split(delim) if p.strip()]
+        email = parts[0] if len(parts) >= 1 else item
+        pwd = parts[1] if len(parts) >= 2 else ""
+        token = parts[2] if len(parts) >= 3 else ""
+        row_data = [idx, product_name, email, pwd, token, item, now_str]
         ws.append(row_data)
         row_idx = idx + 1
         for c in range(1, len(row_data) + 1):
             cell = ws.cell(row=row_idx, column=c)
             cell.font = data_font
             cell.border = thin_border
-            if c in (1, 4):
+            if c in (1, 7):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    ws.column_dimensions['A'].width = 8
-    ws.column_dimensions['B'].width = 25
-    ws.column_dimensions['C'].width = 75
-    ws.column_dimensions['D'].width = 22
+    ws.column_dimensions['A'].width = 6
+    ws.column_dimensions['B'].width = 22
+    ws.column_dimensions['C'].width = 32
+    ws.column_dimensions['D'].width = 20
+    ws.column_dimensions['E'].width = 45
+    ws.column_dimensions['F'].width = 50
+    ws.column_dimensions['G'].width = 22
 
     bio = io.BytesIO()
     wb.save(bio)
@@ -1016,7 +1048,6 @@ def format_credentials_card(items: List[str], prod_name: str, cat_name: str) -> 
         lines.append(f"🌐 <b>{prod_name}</b>")
         lines.append("────────────────────────")
         for idx, item in enumerate(items, start=1):
-            # Parse server:port:user:pass or server:port@user:pass or similar
             parts = [p.strip() for p in item.replace("@", ":").split(":") if p.strip()]
             if len(parts) >= 4:
                 host, port, u_name, pwd = parts[0], parts[1], parts[2], parts[3]
@@ -1039,17 +1070,23 @@ def format_credentials_card(items: List[str], prod_name: str, cat_name: str) -> 
         lines.append(f"🛡️ <b>{prod_name}</b>")
         lines.append("────────────────────────")
         for idx, item in enumerate(items, start=1):
-            parts = [p.strip() for p in item.split(":") if p.strip()]
+            delim = "|" if "|" in item else ":"
+            parts = [p.strip() for p in item.split(delim) if p.strip()]
             if len(parts) >= 2:
                 email, pwd = parts[0], parts[1]
                 if len(items) > 1:
                     lines.append(f"📦 <b>Item #{idx}</b>")
                 lines.append(f"👤 <b>Email / User</b> : <code>{email}</code>")
                 lines.append(f"🔐 <b>Password</b>     : <code>{pwd}</code>")
+                if len(parts) >= 3:
+                    tok = parts[2]
+                    tok_disp = tok[:100] + "..." if len(tok) > 100 else tok
+                    lines.append(f"🎟️ <b>Token / Session</b> : <code>{tok_disp}</code>")
             else:
                 if len(items) > 1:
                     lines.append(f"🔑 <b>Key / Code #{idx}</b>")
-                lines.append(f"🎟️ <b>Key / Code</b> : <code>{item}</code>")
+                item_disp = item[:100] + "..." if len(item) > 100 else item
+                lines.append(f"🎟️ <b>Key / Code</b> : <code>{item_disp}</code>")
             if idx < len(items):
                 lines.append("")
 
@@ -1839,21 +1876,42 @@ async def process_order(query, prod_id: int, quantity: int):
 
             bot_info = await get_bot(query).get_me()
 
-            # 1. Send Formatted 1-Tap Copy Credentials Card matching screenshot
-            card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
-            await query.message.reply_text(card_text, parse_mode=ParseMode.HTML)
-
-            # 2. If Mail or bulk items, also attach Excel (.xlsx) file
-            if "MAIL" in prod["cat_name"].upper() or len(items_content) > 1:
+            # Delivery Strategy: 1 Item = 1-Tap Copy Card, >1 Items = Excel Delivery (No Chat Flooding!)
+            if quantity == 1:
+                card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
+                await query.message.reply_text(card_text, parse_mode=ParseMode.HTML)
+                if "MAIL" in prod["cat_name"].upper():
+                    try:
+                        excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
+                        await query.message.reply_document(
+                            document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
+                            caption=f"📂 <b>Excel Data Backup:</b> <code>{receipt_no}</code>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error sending excel: {e}")
+            else:
+                # Bulk Orders: Send sleek confirmation message and deliver accounts strictly via Excel file
+                bulk_msg = (
+                    f"🎉 <b>আপনার অর্ডার সফলভাবে সম্পন্ন হয়েছে!</b>\n"
+                    f"─────────────────────────────\n"
+                    f"🧾 <b>Receipt:</b> <code>{receipt_no}</code>\n"
+                    f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
+                    f"🔢 <b>পরিমাণ:</b> {quantity} টি | <b>মোট পরিশোধ:</b> {format_price(total_bdt)} BDT\n"
+                    f"─────────────────────────────\n"
+                    f"📂 <b>আপনার সবকটি {quantity} টি অ্যাকাউন্ট/মেইল নিচের এক্সেল ফাইলে সুন্দরভাবে সাজিয়ে দেওয়া হলো।</b>\n"
+                    f"<i>(ফাইলটি ডাউনলোড করে ওপেন করলেই সব ইমেইল ও পাসওয়ার্ড পেয়ে যাবেন)</i>"
+                )
+                await query.message.reply_text(bulk_msg, parse_mode=ParseMode.HTML)
                 try:
                     excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
                     await query.message.reply_document(
                         document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
-                        caption=f"📂 <b>Excel Data Backup:</b> <code>{receipt_no}</code>",
+                        caption=f"📂 <b>Accounts Excel File:</b> <code>{receipt_no}</code> ({quantity} pcs)",
                         parse_mode=ParseMode.HTML,
                     )
                 except Exception as e:
-                    logger.warning(f"Error sending excel: {e}")
+                    logger.error(f"Error sending bulk excel file: {e}")
 
             # Send Official PDF Receipt
             try:
