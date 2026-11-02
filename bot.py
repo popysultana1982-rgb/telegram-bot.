@@ -70,6 +70,20 @@ DB_FILE = "store_database.db"
 _GLOBAL_BOT_APP = None
 _GLOBAL_EVENT_LOOP = None
 
+
+def get_bot(query=None):
+    """Safely retrieves the active Bot instance avoiding 'CallbackQuery object has no attribute bot'."""
+    if query is not None and hasattr(query, "get_bot"):
+        try:
+            b = query.get_bot()
+            if b:
+                return b
+        except Exception:
+            pass
+    if _GLOBAL_BOT_APP:
+        return _GLOBAL_BOT_APP.bot
+    return None
+
 async def _notify_payment_success(user_id: int, amount: float, invoice_id: str):
     if _GLOBAL_BOT_APP:
         try:
@@ -1511,7 +1525,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.message.reply_text("অর্ডার পাওয়া যায়নি।")
             return
 
-        bot_info = await query.bot.get_me()
+        bot_info = await get_bot(query).get_me()
         try:
             pdf_bio = generate_pdf_receipt(
                 receipt_no=o["receipt_no"],
@@ -1798,7 +1812,7 @@ async def process_order(query, prod_id: int, quantity: int):
             conn.commit()
             conn.close()
 
-            bot_info = await query.bot.get_me()
+            bot_info = await get_bot(query).get_me()
 
             # 1. Send Formatted 1-Tap Copy Credentials Card matching screenshot
             card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
@@ -1842,7 +1856,7 @@ async def process_order(query, prod_id: int, quantity: int):
 
             # Alert Admin
             try:
-                await query.bot.send_message(
+                await get_bot(query).send_message(
                     chat_id=SUPER_ADMIN_ID,
                     text=(
                         f"🔔 <b>নতুন প্রোডাক্ট সেল হয়েছে!</b>\n"
@@ -1867,7 +1881,7 @@ async def process_order(query, prod_id: int, quantity: int):
         conn.commit()
         conn.close()
 
-        bot_info = await query.bot.get_me()
+        bot_info = await get_bot(query).get_me()
 
         # 1. Send Official Order Confirmation Card to Customer
         confirm_msg = (
@@ -1912,7 +1926,7 @@ async def process_order(query, prod_id: int, quantity: int):
             [InlineKeyboardButton(f"❌ Cancel & Refund #{order_id}", callback_data=f"adm_refund_{order_id}")]
         ])
         try:
-            await query.bot.send_message(
+            await get_bot(query).send_message(
                 chat_id=SUPER_ADMIN_ID,
                 text=(
                     f"🔔 <b>নতুন ম্যানুয়াল অর্ডার প্রয়োজন!</b>\n"
