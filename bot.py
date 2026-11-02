@@ -389,7 +389,8 @@ def init_db():
         "shop_name": "Will be Earn Shop",
         "shop_tagline": "Digital Products & Services",
         "usdt_rate": "125.0",
-        "min_deposit": "20.0",
+        "min_deposit_manual": "20.0",
+        "min_deposit_instant": "100.0",
         "support_username": "@Talha_juba098",
         "bkash_number": "01XXXXXXXXX (Personal - Send Money)",
         "nagad_number": "01XXXXXXXXX (Personal - Send Money)",
@@ -1061,16 +1062,26 @@ async def support_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def deposit_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_user = get_or_create_user(user.id, user.full_name, user.username)
-    min_dep = float(get_setting("min_deposit", "20.0"))
+    min_man = float(get_setting("min_deposit_manual", "20.0"))
+    min_ins = float(get_setting("min_deposit_instant", "100.0"))
 
-    set_user_state(user.id, "WAITING_DEP_AMOUNT_INIT", {})
     text = (
-        f"💳 <b>অ্যাড ব্যালেন্স / ডিপোজিট</b>\n"
+        f"💳 <b>ডিপোজিট মেথড নির্বাচন করুন:</b>\n"
         f"─────────────────────────────\n"
         f"💰 বর্তমান ব্যালেন্স: <b>{db_user['balance_bdt']:.2f} BDT</b>\n\n"
-        f"আপনি কত টাকা ডিপোজিট করতে চান? টাকার পরিমাণ লিখে পাঠান (সর্বনিম্ন <b>{min_dep:.0f}</b> টাকা):"
+        f"⚡ <b>১. Instant Auto Payment:</b>\n"
+        f"• বিকাশ, নগদ ও কার্ড দিয়ে ১ সেকেন্ডে অটোমেটিক ব্যালেন্স যোগ হবে। কোনো TrxID লাগবে না।\n"
+        f"• সর্বনিম্ন ডিপোজিট: <b>{min_ins:.0f} BDT</b>\n\n"
+        f"📱 <b>২. Manual Send Money:</b>\n"
+        f"• পার্সোনাল নাম্বারে সেন্ড মানি করে TrxID পাঠাবেন, এডমিন চেক করে ব্যালেন্স যোগ করবে।\n"
+        f"• সর্বনিম্ন ডিপোজিট: <b>{min_man:.0f} BDT</b>\n\n"
+        f"নিচের বাটন থেকে আপনার পছন্দের মাধ্যমটি বেছে নিন 👇"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⚡ Instant Auto Payment (Min {min_ins:.0f} Tk)", callback_data="dep_opt_instant")],
+        [InlineKeyboardButton(f"📱 Manual Send Money (Min {min_man:.0f} Tk)", callback_data="dep_opt_manual")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ------------------------------------------------------------------------------
 # 7. INLINE CALLBACK QUERY DISPATCHER (Users & Admin Nested Flow)
@@ -1174,6 +1185,27 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         set_user_state(user_id, "WAITING_CUSTOM_QTY", {"prod_id": prod_id})
         await query.message.reply_text(
             "✏️ <b>Custom Quantity:</b>\nআপনি কতগুলো কিনতে চান তা সংখ্যায় লিখে পাঠান (যেমন: 5, 20, 50):",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Deposit Choice: Instant Auto Payment vs Manual Send Money
+    if data == "dep_opt_instant":
+        min_ins = float(get_setting("min_deposit_instant", "100.0"))
+        set_user_state(user_id, "WAITING_DEP_AMOUNT_INSTANT", {})
+        await query.message.reply_text(
+            f"⚡ <b>Instant Auto Payment (কোনো TrxID লাগবে না):</b>\n\n"
+            f"আপনি কত টাকা ডিপোজিট করতে চান? টাকার পরিমাণ লিখে পাঠান (সর্বনিম্ন <b>{min_ins:.0f}</b> টাকা):",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if data == "dep_opt_manual":
+        min_man = float(get_setting("min_deposit_manual", "20.0"))
+        set_user_state(user_id, "WAITING_DEP_AMOUNT_MANUAL", {})
+        await query.message.reply_text(
+            f"📱 <b>Manual Send Money (পার্সোনাল নাম্বার):</b>\n\n"
+            f"আপনি কত টাকা ডিপোজিট করতে চান? টাকার পরিমাণ লিখে পাঠান (সর্বনিম্ন <b>{min_man:.0f}</b> টাকা):",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -2086,7 +2118,8 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         nagad = get_setting("nagad_number")
         binance = get_setting("binance_id")
         rate = get_setting("usdt_rate", "125.0")
-        min_dep = get_setting("min_deposit", "20.0")
+        min_man = get_setting("min_deposit_manual", "20.0")
+        min_ins = get_setting("min_deposit_instant", "100.0")
 
         text = (
             f"💳 <b>পেমেন্ট সেটিংস ও কন্ট্রোল প্যানেল:</b>\n"
@@ -2094,7 +2127,8 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             f"📱 <b>bKash Personal:</b> <code>{bkash}</code>\n"
             f"📱 <b>Nagad Personal:</b> <code>{nagad}</code>\n"
             f"💎 <b>Binance Info:</b> <code>{binance}</code>\n"
-            f"💰 <b>সর্বনিম্ন ডিপোজিট সীমা:</b> <b>{float(min_dep):.0f} BDT</b>\n"
+            f"⚡ <b>ইনস্ট্যান্ট অটো মিনিমাম:</b> <b>{float(min_ins):.0f} BDT</b>\n"
+            f"📱 <b>ম্যানুয়াল মিনিমাম:</b> <b>{float(min_man):.0f} BDT</b>\n"
             f"💵 <b>USDT রেট:</b> 1 USDT = {rate} BDT\n\n"
             f"যেটি পরিবর্তন করতে চান, নিচের বাটনে চাপ দিন:"
         )
@@ -2102,11 +2136,22 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             [InlineKeyboardButton("📱 Edit bKash Number", callback_data="adm_set_bkash")],
             [InlineKeyboardButton("📱 Edit Nagad Number", callback_data="adm_set_nagad")],
             [InlineKeyboardButton("💎 Edit Binance Info", callback_data="adm_set_binance")],
-            [InlineKeyboardButton("💰 Edit Minimum Deposit", callback_data="adm_set_mindep")],
+            [InlineKeyboardButton("⚡ Edit Instant Min Deposit", callback_data="adm_set_mindep_instant")],
+            [InlineKeyboardButton("💰 Edit Manual Min Deposit", callback_data="adm_set_mindep_manual")],
             [InlineKeyboardButton("💵 Edit USDT Exchange Rate", callback_data="adm_set_rate")],
             [InlineKeyboardButton("< Back to Dashboard", callback_data="adm_root")],
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data == "adm_set_mindep_instant":
+        set_user_state(user_id, "ADMIN_WAITING_MINDEP_INSTANT", {})
+        await query.message.reply_text("⚡ ইনস্ট্যান্ট অটো পেমেন্টে সর্বনিম্ন ডিপোজিট কত টাকা হবে লিখুন (যেমন: 100):")
+        return
+
+    if data == "adm_set_mindep_manual":
+        set_user_state(user_id, "ADMIN_WAITING_MINDEP_MANUAL", {})
+        await query.message.reply_text("📱 ম্যানুয়াল সেন্ড মানিতে সর্বনিম্ন ডিপোজিট কত টাকা হবে লিখুন (যেমন: 20):")
         return
 
     if data == "adm_set_bkash":
@@ -2476,33 +2521,74 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await admin_panel_menu_handler(update, context)
         return
 
-    # 1. User Deposit Flow: Amount Input & Min Deposit Check
-    if state == "WAITING_DEP_AMOUNT_INIT":
-        min_dep = float(get_setting("min_deposit", "20.0"))
+    # 1. User Deposit Flow: Instant Auto Payment Handler
+    if state == "WAITING_DEP_AMOUNT_INSTANT":
+        min_ins = float(get_setting("min_deposit_instant", "100.0"))
         try:
             amt = float(text)
-            if amt < min_dep:
+            if amt < min_ins:
                 await update.message.reply_text(
-                    f"❌ <b>মিনিমাম ডিপোজিট হলো {min_dep:.0f} টাকা।</b>\n"
-                    f"{min_dep:.0f} বা তার বেশি টাকার পরিমাণ লিখুন:",
+                    f"❌ <b>ইনস্ট্যান্ট পেমেন্টে সর্বনিম্ন ডিপোজিট হলো {min_ins:.0f} টাকা।</b>\n"
+                    f"{min_ins:.0f} বা তার বেশি টাকার পরিমাণ লিখুন:",
                     parse_mode=ParseMode.HTML,
                 )
                 return
         except ValueError:
-            await update.message.reply_text("দয়া করে সঠিক সংখ্যায় টাকার পরিমাণ লিখুন (যেমন: 50 বা 100):")
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যায় টাকার পরিমাণ লিখুন (যেমন: 100):")
             return
 
-        set_user_state(user.id, "WAITING_DEP_METHOD_SELECT", {"amount": amt})
+        bot_info = await context.bot.get_me()
+        await update.message.reply_text("⏳ আপনার সিকিউর পেমেন্ট লিংক তৈরি করা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
+        charge_res = create_paymently_charge(amt, user.id, user.full_name, bot_info.username)
+
+        if charge_res and charge_res.get("status") and charge_res.get("payment_url"):
+            pay_url = charge_res["payment_url"]
+            inv_id = charge_res.get("invoice_id", "")
+            set_user_state(user.id, None)
+
+            txt = (
+                f"💳 <b>ইনস্ট্যান্ট অটো পেমেন্ট (bKash / Nagad)</b>\n"
+                f"─────────────────────────────\n"
+                f"💰 <b>ডিপোজিট পরিমাণ:</b> <b>{amt:.2f} BDT</b>\n"
+                f"🧾 <b>ইনভয়েস আইডি:</b> <code>{inv_id}</code>\n\n"
+                f"📌 নিচের <b>Pay Now</b> বাটনে চাপ দিয়ে বিকাশ বা নগদে পেমেন্ট সম্পন্ন করুন।\n"
+                f"পেমেন্ট শেষ হওয়ামাত্র কোনো TrxID দেওয়া ছাড়াই একা একা ব্যালেন্স যুক্ত হয়ে যাবে!\n\n"
+                f"<i>(পেমেন্ট শেষে অটো যোগ না হলে 'Check Payment Status' বাটনে চাপ দিন)</i>"
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Pay Now (বিকাশ / নগদ)", url=pay_url)],
+                [InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"usr_checkpay_{inv_id}_{amt}")],
+                [InlineKeyboardButton("< Cancel", callback_data="usr_root_cats")]
+            ])
+            await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await update.message.reply_text("⚠️ গেটওয়ে সার্ভারে সাময়িক সমস্যা হচ্ছে। দয়া করে Manual Send Money অপশনটি ব্যবহার করুন।")
+        return
+
+    # 2. User Deposit Flow: Manual Send Money Handler
+    if state == "WAITING_DEP_AMOUNT_MANUAL":
+        min_man = float(get_setting("min_deposit_manual", "20.0"))
+        try:
+            amt = float(text)
+            if amt < min_man:
+                await update.message.reply_text(
+                    f"❌ <b>ম্যানুয়াল সেন্ড মানিতে সর্বনিম্ন ডিপোজিট হলো {min_man:.0f} টাকা।</b>\n"
+                    f"{min_man:.0f} বা তার বেশি টাকার পরিমাণ লিখুন:",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যায় টাকার পরিমাণ লিখুন (যেমন: 20 বা 50):")
+            return
+
+        set_user_state(user.id, "WAITING_DEP_TRX", {"amount": amt})
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ Auto Payment (bKash/Nagad/Card)", callback_data="usr_dep_auto_pay")],
-            [InlineKeyboardButton("📱 Manual Send Money (Personal)", callback_data="usr_dep_manual_menu")],
-            [InlineKeyboardButton("< Cancel", callback_data="menu_home")]
+            [InlineKeyboardButton("📱 bKash", callback_data="usr_dep_method_bKash"), InlineKeyboardButton("📱 Nagad", callback_data="usr_dep_method_Nagad")],
+            [InlineKeyboardButton("💎 Binance", callback_data="usr_dep_method_Binance")],
         ])
         await update.message.reply_text(
-            f"✅ আপনি <b>{amt:.2f} BDT</b> ডিপোজিট করতে চেয়েছেন।\n\n"
-            f"নিচের যেকোনো পেমেন্ট অপশন বেছে নিন:\n"
-            f"• <b>Auto Payment:</b> কোনো TrxID ছাড়া সেকেন্ডের মধ্যে স্বয়ংক্রিয় ব্যালেন্স যোগ হবে।\n"
-            f"• <b>Manual:</b> পার্সোনাল নাম্বারে সেন্ড মানি করে TrxID সাবমিট করবেন।",
+            f"✅ আপনি <b>{amt:.2f} BDT</b> ম্যানুয়াল ডিপোজিট করতে চেয়েছেন।\n\n"
+            f"নিচের কোন মাধ্যমে সেন্ড মানি করবেন সিলেক্ট করুন:",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -2777,16 +2863,28 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"✅ নতুন বাইনান্স তথ্য সেট হয়েছে: <code>{text}</code>", parse_mode=ParseMode.HTML)
         return
 
-    if state == "ADMIN_WAITING_MINDEP":
+    if state == "ADMIN_WAITING_MINDEP_INSTANT":
         try:
             new_min = float(text)
             if new_min < 0:
                 raise ValueError
-            set_setting("min_deposit", str(new_min))
+            set_setting("min_deposit_instant", str(new_min))
             set_user_state(user.id, None)
-            await update.message.reply_text(f"✅ সর্বনিম্ন ডিপোজিট সীমা সেট হয়েছে: <b>{new_min:.0f} BDT</b>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"✅ ইনস্ট্যান্ট অটো পেমেন্টে সর্বনিম্ন ডিপোজিট সীমা সেট হয়েছে: <b>{new_min:.0f} BDT</b>", parse_mode=ParseMode.HTML)
         except ValueError:
-            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন (যেমন: 20 বা 50):")
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন (যেমন: 100):")
+        return
+
+    if state == "ADMIN_WAITING_MINDEP_MANUAL":
+        try:
+            new_min = float(text)
+            if new_min < 0:
+                raise ValueError
+            set_setting("min_deposit_manual", str(new_min))
+            set_user_state(user.id, None)
+            await update.message.reply_text(f"✅ ম্যানুয়াল সেন্ড মানিতে সর্বনিম্ন ডিপোজিট সীমা সেট হয়েছে: <b>{new_min:.0f} BDT</b>", parse_mode=ParseMode.HTML)
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন (যেমন: 20):")
         return
 
     if state == "ADMIN_WAITING_RATE":
