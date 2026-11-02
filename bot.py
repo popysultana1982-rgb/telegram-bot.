@@ -296,7 +296,8 @@ def init_db():
     CREATE TABLE IF NOT EXISTS categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        icon TEXT DEFAULT '🛍️'
+        icon TEXT DEFAULT '🛍️',
+        position INTEGER DEFAULT 0
     )
     """)
 
@@ -306,6 +307,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category_id INTEGER,
         name TEXT NOT NULL,
+        position INTEGER DEFAULT 0,
         FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE CASCADE
     )
     """)
@@ -381,6 +383,16 @@ def init_db():
         value TEXT
     )
     """)
+
+    # Ensure position columns exist
+    try:
+        cursor.execute("ALTER TABLE categories ADD COLUMN position INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE subcategories ADD COLUMN position INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     conn.commit()
 
@@ -492,16 +504,15 @@ def seed_clean_store(conn):
                 (psub_id, pkg_name, bdt, usdt),
             )
 
-    # 4. Mail Brands & Plans
+    # 4. Mail Brands & Plans (Direct: Hotmail, Outlook, FR Outlook)
     mail_id = cat_map.get("✉️ Mail")
     mail_catalog = {
-        "Hotmail": [("Fresh Hotmail (Normal)", 10.0), ("Hotmail (Bulk 5+)", 9.0)],
-        "Outlook": [("Fresh Outlook", 10.0), ("Outlook (Old)", 12.0)],
-        "FR Outlook": [("FR Outlook (Direct)", 12.0)],
-        "AOL Mail": [("AOL Fresh", 12.0)],
+        "Hotmail": [("Hotmail", 0.65)],
+        "Outlook": [("Outlook", 0.68)],
+        "FR Outlook": [("FR Outlook", 0.87)],
     }
-    for mbrand, mvariants in mail_catalog.items():
-        cursor.execute("INSERT INTO subcategories (category_id, name) VALUES (?, ?)", (mail_id, mbrand))
+    for mpos, (mbrand, mvariants) in enumerate(mail_catalog.items(), start=1):
+        cursor.execute("INSERT INTO subcategories (category_id, name, position) VALUES (?, ?, ?)", (mail_id, mbrand, mpos))
         msub_id = cursor.lastrowid
         for vname, bdt in mvariants:
             cursor.execute(
@@ -509,15 +520,15 @@ def seed_clean_store(conn):
                 (msub_id, vname, bdt, bdt / 125.0),
             )
 
-    # 5. Recovery Added Mail
+    # 5. Recovery Added Mail (Direct: Recovery Hotmail, Recovery Outlook, Recovery FR Outlook)
     rec_mail_id = cat_map.get("✉️ Recovery Added Mail")
     rec_catalog = {
-        "Recovery Hotmail": [("Hotmail (Recovery Added)", 12.0)],
-        "Recovery Outlook": [("Outlook (Recovery Added)", 12.0)],
-        "Recovery FR Outlook": [("FR Outlook (Recovery Added)", 15.0)],
+        "Recovery Hotmail": [("Recovery Added Hotmail", 0.95)],
+        "Recovery Outlook": [("Recovery Added Outlook", 0.95)],
+        "Recovery FR Outlook": [("Recovery Added FR Outlook", 1.20)],
     }
-    for rbrand, rvariants in rec_catalog.items():
-        cursor.execute("INSERT INTO subcategories (category_id, name) VALUES (?, ?)", (rec_mail_id, rbrand))
+    for rpos, (rbrand, rvariants) in enumerate(rec_catalog.items(), start=1):
+        cursor.execute("INSERT INTO subcategories (category_id, name, position) VALUES (?, ?, ?)", (rec_mail_id, rbrand, rpos))
         rsub_id = cursor.lastrowid
         for vname, bdt in rvariants:
             cursor.execute(
@@ -936,14 +947,14 @@ def format_credentials_card(items: List[str], prod_name: str, cat_name: str) -> 
             parts = [p.strip() for p in item.split(":") if p.strip()]
             if len(parts) >= 2:
                 email, pwd = parts[0], parts[1]
-            else:
-                email, pwd = item, ""
-
-            if len(items) > 1:
-                lines.append(f"📦 <b>Account #{idx}</b>")
-            lines.append(f"👤 <b>Email / User</b> : <code>{email}</code>")
-            if pwd:
+                if len(items) > 1:
+                    lines.append(f"📦 <b>Item #{idx}</b>")
+                lines.append(f"👤 <b>Email / User</b> : <code>{email}</code>")
                 lines.append(f"🔐 <b>Password</b>     : <code>{pwd}</code>")
+            else:
+                if len(items) > 1:
+                    lines.append(f"🔑 <b>Key / Code #{idx}</b>")
+                lines.append(f"🎟️ <b>Key / Code</b> : <code>{item}</code>")
             if idx < len(items):
                 lines.append("")
 
@@ -1037,14 +1048,9 @@ async def buy_products_menu_handler(update: Update, context: ContextTypes.DEFAUL
 
     text = "🛍️ <b>Buy Products</b>\n\nSelect a category:"
     keyboard = []
-    row = []
     for cat in cats:
-        row.append(InlineKeyboardButton(cat["name"], callback_data=f"usr_cat_{cat['id']}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+        keyboard.append([InlineKeyboardButton(cat["name"], callback_data=f"usr_cat_{cat['id']}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="usr_cancel_home")])
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1130,6 +1136,14 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    if data == "usr_cancel_home":
+        await query.message.reply_text("❌ কেনাকাটা বাতিল করা হয়েছে। নতুন অর্ডারের জন্য মেনু ব্যবহার করুন।")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return
+
     if data == "usr_root_cats":
         conn = get_db()
         c = conn.cursor()
@@ -1138,14 +1152,9 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         conn.close()
         text = "🛍️ <b>Buy Products</b>\n\nSelect a category:"
         keyboard = []
-        row = []
         for cat in cats:
-            row.append(InlineKeyboardButton(cat["name"], callback_data=f"usr_cat_{cat['id']}"))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
+            keyboard.append([InlineKeyboardButton(cat["name"], callback_data=f"usr_cat_{cat['id']}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="usr_cancel_home")])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
@@ -1188,7 +1197,35 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     # Step 3 -> Step 4: Variant Selected -> Show Product Card & Quantity Selector
     if data.startswith("usr_prod_"):
         prod_id = int(data.split("_")[2])
-        await show_product_card(query, prod_id)
+        await render_purchase_summary(query, prod_id, quantity=1, edit=True)
+        return
+
+    # Interactive Purchase Summary Calculator Callbacks
+    if data.startswith("calc_add_"):
+        parts = data.split("_")
+        prod_id = int(parts[2])
+        qty = int(parts[3]) + 1
+        await render_purchase_summary(query, prod_id, quantity=qty, edit=True)
+        return
+
+    if data.startswith("calc_sub_"):
+        parts = data.split("_")
+        prod_id = int(parts[2])
+        qty = max(1, int(parts[3]) - 1)
+        await render_purchase_summary(query, prod_id, quantity=qty, edit=True)
+        return
+
+    if data.startswith("calc_custom_"):
+        prod_id = int(data.split("_")[2])
+        set_user_state(user_id, "WAITING_CALC_CUSTOM_QTY", {"prod_id": prod_id})
+        await query.message.reply_text("✏️ <b>Enter Quantity:</b>\nআপনি কতগুলো কিনতে চান তা সংখ্যায় লিখে পাঠান (যেমন: 5, 20, 50):", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("calc_confirm_"):
+        parts = data.split("_")
+        prod_id = int(parts[2])
+        qty = int(parts[3])
+        await process_order(query, prod_id, qty)
         return
 
     # Step 4 -> Purchase Order
@@ -1499,6 +1536,74 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ------------------------------------------------------------------------------
 # 8. PRODUCT CARD & PURCHASE ENGINE
 # ------------------------------------------------------------------------------
+
+async def render_purchase_summary(query_or_message, prod_id: int, quantity: int = 1, edit: bool = True):
+    """Renders the interactive Purchase Summary card with live calculator buttons matching image_2e14ee.png."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+    SELECT p.*, s.name as sub_name, s.category_id, c.name as cat_name
+    FROM products p
+    JOIN subcategories s ON p.subcategory_id = s.id
+    JOIN categories c ON s.category_id = c.id
+    WHERE p.id = ?
+    """, (prod_id,))
+    p = c.fetchone()
+    conn.close()
+
+    if not p:
+        return
+
+    rate = p["price_bdt"]
+    total = rate * quantity
+    full_name = f"{p['sub_name']} — {p['name']}"
+
+    text = (
+        f"🧾 <b>PURCHASE SUMMARY</b>\n"
+        f"─────────────────────────────\n"
+        f"📁 <b>Category:</b> {p['cat_name']}\n"
+        f"✉️ <b>Package:</b> {full_name}\n"
+        f"─────────────────────────────\n"
+        f"✅ <b>Quantity:</b> {quantity}\n"
+        f"💲 <b>Rate:</b> {format_price(rate)} BDT\n"
+        f"🛒 <b>Total Price:</b> {format_price(total)} BDT"
+    )
+
+    kb = [
+        [
+            InlineKeyboardButton("➖", callback_data=f"calc_sub_{p['id']}_{quantity}"),
+            InlineKeyboardButton(f"{quantity}", callback_data=f"calc_noop_{p['id']}_{quantity}"),
+            InlineKeyboardButton("➕", callback_data=f"calc_add_{p['id']}_{quantity}"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Enter quantity", callback_data=f"calc_custom_{p['id']}")
+        ],
+        [
+            InlineKeyboardButton("Back", callback_data=f"usr_sub_{p['subcategory_id']}"),
+            InlineKeyboardButton("Cancel", callback_data="usr_root_cats"),
+        ],
+        [
+            InlineKeyboardButton("Confirm", callback_data=f"calc_confirm_{p['id']}_{quantity}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(kb)
+
+    if edit and hasattr(query_or_message, "edit_message_text"):
+        try:
+            await query_or_message.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+
+    if p["image_file_id"]:
+        try:
+            await query_or_message.reply_photo(photo=p["image_file_id"], caption=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+
+    await query_or_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
 async def show_product_card(query, prod_id: int):
     conn = get_db()
     c = conn.cursor()
@@ -1904,19 +2009,30 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         return
 
     # ==================== 2. MANAGE BUTTONS & PRODUCTS (4-TIER NESTED) ====================
-    # Step 1: Categories
+    # Step 1: Categories with Live Reordering (⬆️ / ⬇️)
     if data == "adm_btn_step1_cats":
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT id, name FROM categories ORDER BY id ASC")
+        c.execute("SELECT id, name, position FROM categories ORDER BY position ASC, id ASC")
         cats = c.fetchall()
         conn.close()
         kb = []
-        for cat in cats:
-            kb.append([InlineKeyboardButton(cat["name"], callback_data=f"adm_btn_step2_sub_{cat['id']}")])
+        for idx, cat in enumerate(cats):
+            up_btn = InlineKeyboardButton("⬆️", callback_data=f"adm_cat_up_{cat['id']}") if idx > 0 else InlineKeyboardButton("·", callback_data="adm_noop")
+            down_btn = InlineKeyboardButton("⬇️", callback_data=f"adm_cat_down_{cat['id']}") if idx < len(cats) - 1 else InlineKeyboardButton("·", callback_data="adm_noop")
+            kb.append([
+                InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"adm_btn_step2_sub_{cat['id']}"),
+                up_btn,
+                down_btn,
+            ])
         kb.append([InlineKeyboardButton("➕ Add New Category", callback_data="adm_btn_add_cat")])
         kb.append([InlineKeyboardButton("< Back to Dashboard", callback_data="adm_root")])
-        await query.edit_message_text("🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ১]</b>\nযে ক্যাটাগরির ব্র্যান্ড বা মেয়াদ পরিচালনা করবেন, সিলেক্ট করুন:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(
+            "🏷️ <b>[বাটন ও প্রোডাক্ট পরিচালনা — ধাপ ১]</b>\n"
+            "যে ক্যাটাগরি ম্যানেজ করবেন তাতে চাপুন। পজিশন বদলাতে ⬆️ বা ⬇️ ব্যবহার করুন:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
         return
 
     # Step 2: Brands / Subcategories
@@ -1931,15 +2047,17 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
         conn.close()
 
         cat_name = cat_row["name"] if cat_row else "Category"
+        c.execute("SELECT id, name, position FROM subcategories WHERE category_id = ? ORDER BY position ASC, id ASC", (cat_id,))
+        subs = c.fetchall()
         kb = []
-        row = []
-        for s in subs:
-            row.append(InlineKeyboardButton(f"📁 {s['name']}", callback_data=f"adm_btn_step3_prod_{s['id']}"))
-            if len(row) == 2:
-                kb.append(row)
-                row = []
-        if row:
-            kb.append(row)
+        for idx, s in enumerate(subs):
+            up_btn = InlineKeyboardButton("⬆️", callback_data=f"adm_sub_up_{s['id']}") if idx > 0 else InlineKeyboardButton("·", callback_data="adm_noop")
+            down_btn = InlineKeyboardButton("⬇️", callback_data=f"adm_sub_down_{s['id']}") if idx < len(subs) - 1 else InlineKeyboardButton("·", callback_data="adm_noop")
+            kb.append([
+                InlineKeyboardButton(f"📁 {s['name']}", callback_data=f"adm_btn_step3_prod_{s['id']}"),
+                up_btn,
+                down_btn,
+            ])
         kb.append([InlineKeyboardButton(f"➕ Add New Brand in {cat_name}", callback_data=f"adm_btn_add_sub_{cat_id}")])
         kb.append([
             InlineKeyboardButton(f"✏️ Rename Category", callback_data=f"adm_ren_cat_{cat_id}"),
@@ -2009,6 +2127,63 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             [InlineKeyboardButton("< Back", callback_data=f"adm_btn_step3_prod_{p['subcategory_id']}")],
         ]
         await query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # Up / Down Reordering Handlers for Categories
+    if data.startswith("adm_cat_up_") or data.startswith("adm_cat_down_"):
+        is_up = "up" in data
+        target_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT id, position FROM categories ORDER BY position ASC, id ASC")
+        all_cats = c.fetchall()
+        for idx, ct in enumerate(all_cats):
+            if ct["id"] == target_id:
+                swap_idx = idx - 1 if is_up else idx + 1
+                if 0 <= swap_idx < len(all_cats):
+                    other_id = all_cats[swap_idx]["id"]
+                    p1 = ct["position"] or idx
+                    p2 = all_cats[swap_idx]["position"] or swap_idx
+                    if p1 == p2:
+                        p1, p2 = idx, swap_idx
+                    c.execute("UPDATE categories SET position = ? WHERE id = ?", (p2, target_id))
+                    c.execute("UPDATE categories SET position = ? WHERE id = ?", (p1, other_id))
+                    conn.commit()
+                break
+        conn.close()
+        # Refresh Step 1
+        data = "adm_btn_step1_cats"
+
+    # Up / Down Reordering Handlers for Subcategories (Brands)
+    if data.startswith("adm_sub_up_") or data.startswith("adm_sub_down_"):
+        is_up = "up" in data
+        target_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT category_id FROM subcategories WHERE id = ?", (target_id,))
+        p_row = c.fetchone()
+        parent_cat_id = p_row["category_id"] if p_row else 1
+
+        c.execute("SELECT id, position FROM subcategories WHERE category_id = ? ORDER BY position ASC, id ASC", (parent_cat_id,))
+        all_subs = c.fetchall()
+        for idx, sb in enumerate(all_subs):
+            if sb["id"] == target_id:
+                swap_idx = idx - 1 if is_up else idx + 1
+                if 0 <= swap_idx < len(all_subs):
+                    other_id = all_subs[swap_idx]["id"]
+                    p1 = sb["position"] or idx
+                    p2 = all_subs[swap_idx]["position"] or swap_idx
+                    if p1 == p2:
+                        p1, p2 = idx, swap_idx
+                    c.execute("UPDATE subcategories SET position = ? WHERE id = ?", (p2, target_id))
+                    c.execute("UPDATE subcategories SET position = ? WHERE id = ?", (p1, other_id))
+                    conn.commit()
+                break
+        conn.close()
+        # Refresh Step 2
+        data = f"adm_btn_step2_sub_{parent_cat_id}"
+
+    if data == "adm_noop":
         return
 
     # Brand & Category Rename / Delete Callback Handlers
@@ -2741,6 +2916,20 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(res_text, parse_mode=ParseMode.HTML)
         except Exception:
             await update.message.reply_text("❌ অবৈধ 2FA Secret Key! দয়া করে সঠিক কি দিন।")
+        return
+
+    # Interactive Calculator Custom Quantity
+    if state == "WAITING_CALC_CUSTOM_QTY":
+        try:
+            qty = int(text)
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("দয়া করে সঠিক সংখ্যা লিখুন (যেমন: 5 বা 20):")
+            return
+        prod_id = sdata.get("prod_id")
+        set_user_state(user.id, None)
+        await render_purchase_summary(update.message, prod_id, quantity=qty, edit=False)
         return
 
     # 3. Custom Quantity
