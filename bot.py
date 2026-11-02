@@ -11,6 +11,8 @@
 import os
 import sys
 import io
+import urllib.request
+import asyncio
 import time
 import json
 import logging
@@ -64,6 +66,39 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8656707191:AAEqK_Dn6M_OhFP12ATl6g5WyNCY02Db_
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8919985167"))
 DB_FILE = "store_database.db"
 
+
+_GLOBAL_BOT_APP = None
+_GLOBAL_EVENT_LOOP = None
+
+async def _notify_payment_success(user_id: int, amount: float, invoice_id: str):
+    if _GLOBAL_BOT_APP:
+        try:
+            await _GLOBAL_BOT_APP.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"🎉 <b>পেমেন্ট সফলভাবে সম্পন্ন হয়েছে!</b>\n\n"
+                    f"💰 যুক্ত হয়েছে: <b>{amount:.2f} BDT</b>\n"
+                    f"🧾 ইনভয়েস: <code>{invoice_id}</code>\n\n"
+                    f"আপনার ব্যালেন্স স্বয়ংক্রিয়ভাবে আপডেট করা হয়েছে। শপ থেকে কেনাকাটা শুরু করুন!"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        try:
+            await _GLOBAL_BOT_APP.bot.send_message(
+                chat_id=SUPER_ADMIN_ID,
+                text=(
+                    f"🔔 <b>অটোমেটিক পেমেন্ট সম্পন্ন! (Paymently Gateway)</b>\n\n"
+                    f"👤 ইউজার আইডি: <code>{user_id}</code>\n"
+                    f"💰 পরিমাণ: <b>{amount:.2f} BDT</b>\n"
+                    f"🧾 ইনভয়েস: <code>{invoice_id}</code>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
 # ------------------------------------------------------------------------------
 # 2. RENDER WEB SERVICE HEALTH CHECK SERVER (Keeps Render Free Instance Live)
 # ------------------------------------------------------------------------------
@@ -73,6 +108,50 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"CyberNest Bot is running and healthy!")
+
+    def do_POST(self):
+        if "/webhook" in self.path or "/payment" in self.path:
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_data.decode("utf-8"))
+                logger.info(f"Received Paymently Webhook: {data}")
+                status = str(data.get("status", "")).upper()
+                if status in ("COMPLETED", "SUCCESS", "PAID"):
+                    invoice_id = str(data.get("invoice_id", ""))
+                    amount = float(data.get("amount", 0))
+                    metadata = data.get("metadata", {})
+                    user_id = int(metadata.get("user_id", 0)) if metadata else 0
+
+                    if user_id > 0 and amount > 0:
+                        conn = get_db()
+                        c = conn.cursor()
+                        c.execute("SELECT id FROM deposits WHERE trx_id = ? AND status = 'approved'", (invoice_id,))
+                        if not c.fetchone():
+                            now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
+                            c.execute("UPDATE users SET balance_bdt = balance_bdt + ? WHERE user_id = ?", (amount, user_id))
+                            c.execute("INSERT INTO deposits (user_id, method, amount, trx_id, status, created_at) VALUES (?, 'Paymently Auto', ?, ?, 'approved', ?)", (user_id, amount, invoice_id, now_str))
+                            conn.commit()
+                            if _GLOBAL_EVENT_LOOP and _GLOBAL_BOT_APP:
+                                asyncio.run_coroutine_threadsafe(
+                                    _notify_payment_success(user_id, amount, invoice_id),
+                                    _GLOBAL_EVENT_LOOP
+                                )
+                        conn.close()
+
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+                return
+            except Exception as e:
+                logger.error(f"Error handling webhook: {e}")
+                self.send_response(400)
+                self.end_headers()
+                return
+
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -315,6 +394,9 @@ def init_db():
         "bkash_number": "01XXXXXXXXX (Personal - Send Money)",
         "nagad_number": "01XXXXXXXXX (Personal - Send Money)",
         "binance_id": "Pay ID: 12345678 / USDT (TRC20): TQxxxxxxxxxxxxxxxxxx",
+        "paymently_base_url": "https://abutalha.paymently.io/api",
+        "paymently_api_key": "DSlm0lfHRXTa6ZaKuBoRfODt6esAIRxhzUWwBacg",
+        "render_app_url": "https://telegram-bot-2-cs6b.onrender.com",
         "mail_code_url_1": "https://code.yamin.bd/",
     }
     for k, v in default_settings.items():
@@ -752,6 +834,112 @@ def generate_pdf_receipt(
     bio.seek(0)
     return bio
 
+
+
+def create_paymently_charge(amount: float, user_id: int, user_name: str, bot_username: str) -> Optional[Dict[str, Any]]:
+    base_url = get_setting("paymently_base_url", "https://abutalha.paymently.io/api").rstrip("/")
+    api_key = get_setting("paymently_api_key", "DSlm0lfHRXTa6ZaKuBoRfODt6esAIRxhzUWwBacg")
+    render_url = get_setting("render_app_url", "https://telegram-bot-2-cs6b.onrender.com").rstrip("/")
+    
+    endpoint = f"{base_url}/checkout-v2"
+    payload = {
+        "full_name": user_name or "Telegram User",
+        "email": f"user{user_id}@telegram.org",
+        "amount": str(amount),
+        "metadata": {
+            "user_id": str(user_id)
+        },
+        "redirect_url": f"https://t.me/{bot_username.lstrip('@')}",
+        "return_type": "GET",
+        "cancel_url": f"https://t.me/{bot_username.lstrip('@')}",
+        "webhook_url": f"{render_url}/webhook/payment"
+    }
+    headers = {
+        "RT-UDDOKTAPAY-API-KEY": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "CyberNestBot/1.0"
+    }
+    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            return res_data
+    except Exception as e:
+        logger.error(f"Error creating Paymently charge: {e}")
+        return None
+
+def verify_paymently_charge(invoice_id: str) -> Optional[Dict[str, Any]]:
+    base_url = get_setting("paymently_base_url", "https://abutalha.paymently.io/api").rstrip("/")
+    api_key = get_setting("paymently_api_key", "DSlm0lfHRXTa6ZaKuBoRfODt6esAIRxhzUWwBacg")
+    endpoint = f"{base_url}/verify-payment"
+    payload = {"invoice_id": invoice_id}
+    headers = {
+        "RT-UDDOKTAPAY-API-KEY": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "CyberNestBot/1.0"
+    }
+    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            return res_data
+    except Exception as e:
+        logger.error(f"Error verifying Paymently charge: {e}")
+        return None
+
+def format_credentials_card(items: List[str], prod_name: str, cat_name: str) -> str:
+    """Formats credentials with tap-to-copy code blocks matching user's screenshots."""
+    is_proxy = "PROXY" in cat_name.upper() or "PROXY" in prod_name.upper()
+    lines = []
+    
+    if is_proxy:
+        lines.append("✅ <b>Proxy Delivered!</b>")
+        lines.append(f"🌐 <b>{prod_name}</b>")
+        lines.append("────────────────────────")
+        for idx, item in enumerate(items, start=1):
+            # Parse server:port:user:pass or server:port@user:pass or similar
+            parts = [p.strip() for p in item.replace("@", ":").split(":") if p.strip()]
+            if len(parts) >= 4:
+                host, port, u_name, pwd = parts[0], parts[1], parts[2], parts[3]
+            elif len(parts) == 2:
+                host, port = parts[0], parts[1]
+                u_name, pwd = "N/A", "N/A"
+            else:
+                host, port, u_name, pwd = item, "N/A", "N/A", "N/A"
+
+            if len(items) > 1:
+                lines.append(f"🌐 <b>Proxy #{idx}</b>")
+            lines.append(f"🖥️ <b>Host</b>     : <code>{host}</code>")
+            lines.append(f"🔌 <b>Port</b>     : <code>{port}</code>")
+            lines.append(f"👤 <b>Username</b> : <code>{u_name}</code>")
+            lines.append(f"🔐 <b>Password</b> : <code>{pwd}</code>")
+            if idx < len(items):
+                lines.append("")
+    else:
+        lines.append("✅ <b>Service Delivered!</b>")
+        lines.append(f"🛡️ <b>{prod_name}</b>")
+        lines.append("────────────────────────")
+        for idx, item in enumerate(items, start=1):
+            parts = [p.strip() for p in item.split(":") if p.strip()]
+            if len(parts) >= 2:
+                email, pwd = parts[0], parts[1]
+            else:
+                email, pwd = item, ""
+
+            if len(items) > 1:
+                lines.append(f"📦 <b>Account #{idx}</b>")
+            lines.append(f"👤 <b>Email / User</b> : <code>{email}</code>")
+            if pwd:
+                lines.append(f"🔐 <b>Password</b>     : <code>{pwd}</code>")
+            if idx < len(items):
+                lines.append("")
+
+    lines.append("────────────────────────")
+    lines.append("💡 <i>Tap any value to copy</i>")
+    return "\n".join(lines)
+
 # ------------------------------------------------------------------------------
 # 6. USER HANDLERS (Shop, Profile, Deposit, 2FA, Support)
 # ------------------------------------------------------------------------------
@@ -990,6 +1178,78 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
+    # Auto Payment (Paymently Gateway Link Generation)
+    if data == "usr_dep_auto_pay":
+        state, sdata = get_user_state(user_id)
+        amount = sdata.get("amount", 20.0)
+        bot_info = await context.bot.get_me()
+
+        await query.message.reply_text("⏳ আপনার সিকিউর পেমেন্ট লিংক তৈরি করা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
+        charge_res = create_paymently_charge(amount, user_id, query.from_user.full_name, bot_info.username)
+
+        if charge_res and charge_res.get("status") and charge_res.get("payment_url"):
+            pay_url = charge_res["payment_url"]
+            inv_id = charge_res.get("invoice_id", "")
+            set_user_state(user_id, None)
+
+            txt = (
+                f"💳 <b>অটোমেটিক পেমেন্ট গেটওয়ে (bKash / Nagad / Cards)</b>\n"
+                f"─────────────────────────────\n"
+                f"💰 <b>ডিপোজিট পরিমাণ:</b> <b>{amount:.2f} BDT</b>\n"
+                f"🧾 <b>ইনভয়েস আইডি:</b> <code>{inv_id}</code>\n\n"
+                f"📌 নিচের <b>Pay Now</b> বাটনে চাপ দিয়ে বিকাশ বা নগদে পেমেন্ট সম্পন্ন করুন।\n"
+                f"পেমেন্ট শেষ হওয়ামাত্র কোনো TrxID ছাড়াই আপনার ব্যালেন্স স্বয়ংক্রিয়ভাবে যোগ হয়ে যাবে!\n\n"
+                f"<i>(পেমেন্ট শেষে অটো যোগ না হলে 'Check Payment Status' বাটনে চাপ দিন)</i>"
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Pay Now (বিকাশ / নগদ)", url=pay_url)],
+                [InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"usr_checkpay_{inv_id}_{amount}")],
+                [InlineKeyboardButton("< Cancel", callback_data="usr_root_cats")]
+            ])
+            await query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.message.reply_text("⚠️ গেটওয়ে সার্ভারে সাময়িক সমস্যা হচ্ছে। দয়া করে Manual Send Money অপশনটি ব্যবহার করুন।")
+        return
+
+    # Manual payment methods menu
+    if data == "usr_dep_manual_menu":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📱 bKash", callback_data="usr_dep_method_bKash"), InlineKeyboardButton("📱 Nagad", callback_data="usr_dep_method_Nagad")],
+            [InlineKeyboardButton("💎 Binance", callback_data="usr_dep_method_Binance")],
+        ])
+        await query.edit_message_text("নিচের কোন মাধ্যমে সেন্ড মানি করবেন সিলেক্ট করুন:", reply_markup=kb)
+        return
+
+    # Manual verify button (Instant verification fallback)
+    if data.startswith("usr_checkpay_"):
+        parts = data.split("_")
+        inv_id = parts[2]
+        amount = float(parts[3])
+
+        await query.message.reply_text(f"🔍 ইনভয়েস <code>{inv_id}</code> যাচাই করা হচ্ছে...")
+        v_res = verify_paymently_charge(inv_id)
+
+        if v_res and str(v_res.get("status", "")).upper() in ("COMPLETED", "PAID", "SUCCESS"):
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT id FROM deposits WHERE trx_id = ? AND status = 'approved'", (inv_id,))
+            if not c.fetchone():
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
+                c.execute("UPDATE users SET balance_bdt = balance_bdt + ? WHERE user_id = ?", (amount, user_id))
+                c.execute("INSERT INTO deposits (user_id, method, amount, trx_id, status, created_at) VALUES (?, 'Paymently Auto', ?, ?, 'approved', ?)", (user_id, amount, inv_id, now_str))
+                conn.commit()
+                await query.message.reply_text(
+                    f"🎉 <b>পেমেন্ট সফলভাবে ভেরিফাইড হয়েছে!</b>\n"
+                    f"আপনার অ্যাকাউন্টে <b>{amount:.2f} BDT</b> যোগ করা হয়েছে!",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await query.message.reply_text("✅ এই পেমেন্টের ব্যালেন্স ইতিমধ্যে যোগ করা হয়েছে।")
+            conn.close()
+        else:
+            await query.message.reply_text("⏳ এখনো পেমেন্ট সম্পন্ন হয়নি। পেমেন্ট শেষ করে আবার চেক করুন।")
+        return
+
     # ---------------- DEPOSIT METHOD SELECTION ----------------
     if data.startswith("usr_dep_method_"):
         method = data.split("_")[3]
@@ -1031,22 +1291,106 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "prof_purchases":
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 15", (user_id,))
+        c.execute("SELECT id, receipt_no, product_name, total_bdt, order_date FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user_id,))
         orders = c.fetchall()
         conn.close()
         if not orders:
             await query.message.reply_text("🛒 আপনার পূর্বের কোনো কেনাকাটার হিস্টোরি পাওয়া যায়নি।")
             return
-        msg = "🛒 <b>আপনার সর্বমোট অর্ডার ও কেনাকাটা হিস্টোরি:</b>\n─────────────────────────────\n"
+
+        txt = "🛒 <b>আপনার কেনাকাটার তালিকা:</b>\nবিস্তারিত দেখতে ও রিসিট পেতে অর্ডারের ওপর ক্লিক করুন:"
+        kb = []
         for o in orders:
-            msg += (
-                f"🧾 <b>Receipt:</b> <code>{o['receipt_no']}</code>\n"
-                f"📦 <b>আইটেম:</b> {o['product_name']}\n"
-                f"🔢 <b>পরিমাণ:</b> {o['quantity']} টি | মোট: <b>{o['total_bdt']:.2f} BDT</b>\n"
-                f"📅 <b>তারিখ ও বার:</b> {o['order_date']} ({o['day_of_week']})\n"
-                f"─────────────────────────────\n"
+            btn_title = f"🧾 {o['receipt_no']} — {o['product_name']} ({o['total_bdt']:.0f} Tk)"
+            kb.append([InlineKeyboardButton(btn_title, callback_data=f"prof_view_order_{o['id']}")])
+        kb.append([InlineKeyboardButton("< Back to Profile", callback_data="prof_back_root")])
+        await query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # View Specific Purchase Details (matching image_5b8b20.png)
+    if data.startswith("prof_view_order_"):
+        order_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id))
+        o = c.fetchone()
+        conn.close()
+
+        if not o:
+            await query.message.reply_text("❌ অর্ডারটি পাওয়া যায়নি।")
+            return
+
+        # Parse credentials
+        creds_display = ""
+        if o["delivered_data"]:
+            try:
+                items = json.loads(o["delivered_data"]) if o["delivered_data"].startswith("[") else [o["delivered_data"]]
+            except Exception:
+                items = [o["delivered_data"]]
+
+            for itm in items:
+                parts = [p.strip() for p in itm.split(":") if p.strip()]
+                if len(parts) >= 2:
+                    creds_display += f"👤 <code>{parts[0]}</code>\n🔐 <code>{parts[1]}</code>\n"
+                else:
+                    creds_display += f"🔑 <code>{itm}</code>\n"
+        else:
+            creds_display = "<i>⏳ অর্ডারটি প্রসেসিং হচ্ছে, খুব শীঘ্রই ডেলিভারি দেওয়া হবে।</i>"
+
+        date_only = o["order_date"].split()[0] if o["order_date"] else "N/A"
+        txt = (
+            f"⚡ <b>Purchase Details</b>\n\n"
+            f"Type  : <b>{o['category_name']}</b>\n"
+            f"Date  : <code>{date_only}</code>\n"
+            f"Total : <b>{o['total_bdt']:.2f} BDT</b>\n"
+            f"🧾 Receipt : <code>{o['receipt_no']}</code>\n\n"
+            f"<b>Credentials:</b>\n"
+            f"{creds_display}"
+        )
+        kb = [
+            [InlineKeyboardButton("🧾 Resend Receipt PDF", callback_data=f"prof_resend_pdf_{o['id']}")],
+            [InlineKeyboardButton("< Back", callback_data="prof_purchases")],
+        ]
+        await query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # Resend Receipt PDF
+    if data.startswith("prof_resend_pdf_"):
+        order_id = int(data.split("_")[3])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id))
+        o = c.fetchone()
+        conn.close()
+
+        if not o:
+            await query.message.reply_text("অর্ডার পাওয়া যায়নি।")
+            return
+
+        bot_info = await query.bot.get_me()
+        try:
+            pdf_bio = generate_pdf_receipt(
+                receipt_no=o["receipt_no"],
+                date_str=o["order_date"],
+                day_name=o["day_of_week"] or "N/A",
+                customer_name=query.from_user.full_name,
+                telegram_id=user_id,
+                username=query.from_user.username or "",
+                item_desc=o["product_name"],
+                category_name=o["category_name"] or "GENERAL",
+                qty=o["quantity"],
+                unit_price=o["unit_price"] or o["total_bdt"],
+                total_bdt=o["total_bdt"],
+                bot_username=bot_info.username,
             )
-        await query.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            await query.message.reply_document(
+                document=InputFile(pdf_bio, filename=f"Receipt_{o['receipt_no']}.pdf"),
+                caption=f"🧾 <b>Official Payment Receipt:</b> <code>{o['receipt_no']}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error(f"Error resending receipt: {e}")
+            await query.message.reply_text("❌ রিসিট তৈরি করতে সমস্যা হয়েছে।")
         return
 
     if data == "prof_deposit_history":
@@ -1243,20 +1587,21 @@ async def process_order(query, prod_id: int, quantity: int):
 
         bot_info = await query.bot.get_me()
 
-        # Send Excel file
-        excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
-        caption = (
-            f"🎉 <b>আপনার অর্ডার সফলভাবে ডেলিভারি হয়েছে!</b>\n"
-            f"🧾 <b>Receipt:</b> <code>{receipt_no}</code>\n"
-            f"📦 <b>প্রোডাক্ট:</b> {full_product_name}\n"
-            f"🔢 <b>পরিমাণ:</b> {quantity} টি | মোট: {total_bdt:.2f} BDT\n\n"
-            f"📂 আপনার ডেলিভারি ডেটার এক্সেল ফাইলটি উপরে দেওয়া হলো।"
-        )
-        await query.message.reply_document(
-            document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-        )
+        # 1. Send Formatted 1-Tap Copy Credentials Card matching screenshot
+        card_text = format_credentials_card(items_content, full_product_name, prod["cat_name"])
+        await query.message.reply_text(card_text, parse_mode=ParseMode.HTML)
+
+        # 2. If Mail or bulk items, also attach Excel (.xlsx) file
+        if "MAIL" in prod["cat_name"].upper() or len(items_content) > 1:
+            try:
+                excel_bio = generate_excel_delivery(items_content, full_product_name, receipt_no)
+                await query.message.reply_document(
+                    document=InputFile(excel_bio, filename=f"{receipt_no}_{prod['name'].replace(' ', '_')}.xlsx"),
+                    caption=f"📂 <b>Excel Data Backup:</b> <code>{receipt_no}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as e:
+                logger.warning(f"Error sending excel: {e}")
 
         # Send Official PDF Receipt
         try:
@@ -2024,6 +2369,61 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             await query.message.reply_text("অর্ডার পাওয়া যায়নি।")
         return
 
+    # Batch Stock Alert Broadcast Menu
+    if data == "adm_bcast_stock_menu":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+        SELECT p.name as prod_name, s.name as sub_name, p.price_bdt, COUNT(st.id) as cnt
+        FROM products p
+        JOIN subcategories s ON p.subcategory_id = s.id
+        JOIN stock st ON p.id = st.product_id AND st.is_sold = 0
+        GROUP BY p.id, s.name, p.name, p.price_bdt
+        HAVING COUNT(st.id) > 0
+        """)
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await query.message.reply_text("⚠️ বর্তমানে কোনো স্টকে নতুন প্রোডাক্ট নেই। আগে স্টক যোগ করুন।")
+            return
+
+        lines = ["🔔 <b>NEW STOCK ALERT!</b> 🔔", "────────────────────────"]
+        for r in rows:
+            lines.append(f"• <b>{r['sub_name']} {r['prod_name']}</b> — {r['cnt']} টি স্টকে আছে (দাম: {r['price_bdt']:.0f} Tk)")
+        lines.append("────────────────────────")
+        lines.append("🛍️ দ্রুত কেনাকাটা করতে নিচে /start দিয়ে শপ ওপেন করুন!")
+        alert_preview = "\n".join(lines)
+
+        set_user_state(user_id, "ADMIN_CONFIRM_BCAST_TEXT", {"msg": alert_preview})
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Send This Alert to All Users", callback_data="adm_bcast_execute_now")],
+            [InlineKeyboardButton("< Cancel", callback_data="adm_root")],
+        ])
+        await query.message.reply_text(f"📢 <b>ইউজারদের কাছে এই নোটিশটি যাবে:</b>\n\n{alert_preview}", parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data == "adm_bcast_execute_now":
+        state, sdata = get_user_state(user_id)
+        alert_text = sdata.get("msg", "")
+        set_user_state(user_id, None)
+
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users")
+        all_u = [r["user_id"] for r in c.fetchall()]
+        conn.close()
+
+        sent = 0
+        for uid in all_u:
+            try:
+                await context.bot.send_message(chat_id=uid, text=alert_text, parse_mode=ParseMode.HTML)
+                sent += 1
+            except Exception:
+                pass
+        await query.message.reply_text(f"✅ সফলভাবে <b>{sent}</b> জন ইউজারের কাছে Stock Alert পৌঁছে দেওয়া হয়েছে!", parse_mode=ParseMode.HTML)
+        return
+
     # Statistics
     if data == "adm_statistics":
         conn = get_db()
@@ -2094,12 +2494,15 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         set_user_state(user.id, "WAITING_DEP_METHOD_SELECT", {"amount": amt})
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📱 bKash", callback_data="usr_dep_method_bKash"), InlineKeyboardButton("📱 Nagad", callback_data="usr_dep_method_Nagad")],
-            [InlineKeyboardButton("💎 Binance", callback_data="usr_dep_method_Binance")],
+            [InlineKeyboardButton("⚡ Auto Payment (bKash/Nagad/Card)", callback_data="usr_dep_auto_pay")],
+            [InlineKeyboardButton("📱 Manual Send Money (Personal)", callback_data="usr_dep_manual_menu")],
+            [InlineKeyboardButton("< Cancel", callback_data="menu_home")]
         ])
         await update.message.reply_text(
-            f"✅ আপনি <b>{amt:.2f} BDT</b> ডিপোজিট করতে চেয়েছেন।\n"
-            f"নিচের কোন মাধ্যমে টাকা পাঠাবেন সিলেক্ট করুন:",
+            f"✅ আপনি <b>{amt:.2f} BDT</b> ডিপোজিট করতে চেয়েছেন।\n\n"
+            f"নিচের যেকোনো পেমেন্ট অপশন বেছে নিন:\n"
+            f"• <b>Auto Payment:</b> কোনো TrxID ছাড়া সেকেন্ডের মধ্যে স্বয়ংক্রিয় ব্যালেন্স যোগ হবে।\n"
+            f"• <b>Manual:</b> পার্সোনাল নাম্বারে সেন্ড মানি করে TrxID সাবমিট করবেন।",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -2232,16 +2635,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             set_user_state(user.id, None)
             await update.message.reply_text(f"✅ Order #{order_id} সফলভাবে ইউজারের কাছে ডেলিভারি পাঠানো হয়েছে।")
 
-            user_msg = (
-                f"🎉 <b>আপনার অর্ডার ডেলিভারি সম্পন্ন হয়েছে!</b>\n"
-                f"🧾 <b>Receipt:</b> <code>{order['receipt_no']}</code>\n"
-                f"─────────────────────────────\n"
-                f"🛡️ <b>প্রোডাক্ট:</b> {order['product_name']}\n"
-                f"🔢 <b>পরিমাণ:</b> {order['quantity']} টি\n\n"
-                f"🔑 <b>লগইন অ্যাক্সেস / ডেলিভারি ডেটা:</b>\n"
-                f"<code>{text}</code>\n\n"
-                f"📌 <i>ধন্যবাদ আমাদের সাথে থাকার জন্য!</i>"
-            )
+            user_msg = format_credentials_card([text], order['product_name'], order['category_name'])
             if order["image_file_id"]:
                 try:
                     await context.bot.send_photo(chat_id=order["user_id"], photo=order["image_file_id"], caption=user_msg, parse_mode=ParseMode.HTML)
@@ -2517,7 +2911,10 @@ def main():
     print(f"Configured Super Admin ID: {SUPER_ADMIN_ID}")
     print("=" * 60)
 
+    global _GLOBAL_BOT_APP, _GLOBAL_EVENT_LOOP
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    _GLOBAL_BOT_APP = app
+    _GLOBAL_EVENT_LOOP = asyncio.get_event_loop()
 
     # Handlers Registration
     app.add_handler(CommandHandler("start", start_handler))
