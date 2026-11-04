@@ -66,6 +66,26 @@ logger = logging.getLogger("CyberNestBot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8656707191:AAEqK_Dn6M_OhFP12ATl6g5WyNCY02Db_sk")
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8919985167"))
+# ------------------------------------------------------------------------------
+# GROUP & CHANNEL CONFIGURATION (Force Join & Real-Time Proofs)
+# ------------------------------------------------------------------------------
+WELCOME_GROUP_ID = os.getenv("WELCOME_GROUP_ID", "-1004471047712")
+WELCOME_GROUP_LINK = os.getenv("WELCOME_GROUP_LINK", "https://t.me/+rVP6CkmqrnFlNzA1")
+
+TRANSACTION_CHANNEL_ID = os.getenv("TRANSACTION_CHANNEL_ID", "-1003991468184")
+TRANSACTION_CHANNEL_LINK = os.getenv("TRANSACTION_CHANNEL_LINK", "https://t.me/fast_payment_proof_chanel")
+
+_AUTO_SALES_ACTIVE = True
+_RECENTLY_WELCOMED = set()
+
+CUSTOMER_SAMPLE_NAMES = [
+    "7x_TALHA", "Arif Hasan", "Tanvir Ahmed", "Sakib Al Hasan", "Rahim Uddin", 
+    "Mehedi Hasan", "Nusrat Jahan", "Sadia Islam", "Farhana Akter", 
+    "Jannatul Ferdous", "Ayesha Siddiqua", "Rifat Hossain", "Sumaiya Kabir", 
+    "Shakil Khan", "Fahim Shahriar", "Mim Akter", "Tasnim Sultana",
+    "Mahmudul Hasan", "Naimur Rahman", "Sabiha Sultana", "Habibur Rahman"
+]
+
 DB_FILE = "store_database.db"
 
 
@@ -119,6 +139,11 @@ async def _notify_payment_success(user_id: int, amount: float, invoice_id: str):
 # 2. RENDER WEB SERVICE HEALTH CHECK SERVER (Keeps Render Free Instance Live)
 # ------------------------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -435,29 +460,7 @@ def init_db():
     except Exception as e:
         logger.warning(f"Migration purge notice: {e}")
 
-    # Auto-seed 5 test proxies for 9 Proxy 100 MB if stock is empty
-    try:
-        cursor.execute("SELECT id FROM products WHERE name LIKE '%100 MB%' LIMIT 1")
-        p_100 = cursor.fetchone()
-        if p_100:
-            p100_id = p_100["id"]
-            cursor.execute("SELECT COUNT(*) as cnt FROM stock WHERE product_id = ? AND is_sold = 0", (p100_id,))
-            scnt = cursor.fetchone()
-            sc = scnt["cnt"] if isinstance(scnt, dict) else scnt[0]
-            if sc == 0:
-                test_proxies = [
-                    "node01.niceproxy.io:18520:cyber_test01_user:kX9_qW72mP",
-                    "node02.niceproxy.io:18521:cyber_test02_user:vL4_mR83tQ",
-                    "node03.niceproxy.io:18522:cyber_test03_user:zT8_pY44wN",
-                    "node04.niceproxy.io:18523:cyber_test04_user:bM2_rL91kS",
-                    "node05.niceproxy.io:18524:cyber_test05_user:jD6_wK55vH",
-                ]
-                for prx in test_proxies:
-                    cursor.execute("INSERT INTO stock (product_id, content, is_sold, stock_type) VALUES (?, ?, 0, 'proxy')", (p100_id, prx))
-                conn.commit()
-                logger.info("Auto-seeded 5 test proxies for 9 Proxy 100 MB.")
-    except Exception as e:
-        logger.warning(f"Test proxy seeding notice: {e}")
+
 
     # Ensure direct subcategories exist under Mail
     try:
@@ -1100,7 +1103,7 @@ def format_credentials_card(items: List[str], prod_name: str, cat_name: str) -> 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_user = get_or_create_user(user.id, user.full_name, user.username)
-    shop_name = get_setting("shop_name", "Will be Earn Shop")
+    shop_name = get_setting("shop_name", "CyberNest Market")
 
     # Deep-Linking verification check
     if context.args and len(context.args) > 0:
@@ -1109,6 +1112,17 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             receipt_code = arg.replace("order_", "")
             await show_order_verification(update, receipt_code)
             return
+
+    # Check Force Join Membership
+    in_group, in_channel = await check_user_membership(context.bot, user.id)
+    if not (in_group and in_channel):
+        force_txt = (
+            f"👋 <b>স্বাগতম, {user.full_name}!</b>\n\n"
+            f"বট ব্যবহার করতে নিচের বাটনে চাপ দিয়ে গ্রুপ ও চ্যানেলে যুক্ত হয়ে ভেরিফাই করুন:"
+        )
+        kb = get_force_join_keyboard(in_group, in_channel)
+        await update.message.reply_text(force_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
 
     welcome_text = (
         f"🎉 <b>স্বাগতম, {user.full_name}!</b> ✨\n\n"
@@ -1119,6 +1133,43 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     reply_kb = get_main_reply_keyboard(user.id)
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=reply_kb)
+
+
+async def check_user_membership(bot, user_id: int) -> Tuple[bool, bool]:
+    """Checks if a user is a member of the Welcome Group and Proof Channel."""
+    if user_id == SUPER_ADMIN_ID:
+        return True, True
+    
+    in_group = True
+    in_channel = True
+
+    try:
+        m_group = await bot.get_chat_member(chat_id=WELCOME_GROUP_ID, user_id=user_id)
+        if m_group.status in ("left", "kicked"):
+            in_group = False
+    except Exception as e:
+        logger.debug(f"Group membership check: {e}")
+        in_group = False
+
+    try:
+        m_chan = await bot.get_chat_member(chat_id=TRANSACTION_CHANNEL_ID, user_id=user_id)
+        if m_chan.status in ("left", "kicked"):
+            in_channel = False
+    except Exception as e:
+        logger.debug(f"Channel membership check: {e}")
+        in_channel = False
+
+    return in_group, in_channel
+
+def get_force_join_keyboard(in_group: bool, in_channel: bool) -> InlineKeyboardMarkup:
+    """Builds clean inline buttons with embedded URLs (no visible raw text links)."""
+    buttons = []
+    if not in_group:
+        buttons.append([InlineKeyboardButton("📢 Join Update Group", url=WELCOME_GROUP_LINK)])
+    if not in_channel:
+        buttons.append([InlineKeyboardButton("💳 Join Proof Channel", url=TRANSACTION_CHANNEL_LINK)])
+    buttons.append([InlineKeyboardButton("✅ ভেরিফাই করুন", callback_data="btn_check_verification")])
+    return InlineKeyboardMarkup(buttons)
 
 async def show_order_verification(update: Update, receipt_no: str):
     conn = get_db()
@@ -1354,6 +1405,17 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data.startswith("calc_confirm_"):
+        # Check Force Join Membership before buying
+        in_group, in_channel = await check_user_membership(context.bot, user_id)
+        if not (in_group and in_channel):
+            kb = get_force_join_keyboard(in_group, in_channel)
+            await query.message.reply_text(
+                "⚠️ কিনতে হলে আগে নিচের বাটনে চাপ দিয়ে গ্রুপ ও চ্যানেলে জয়েন করে ভেরিফাই করুন:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+            return
+
         parts = data.split("_")
         prod_id = int(parts[2])
         qty = int(parts[3])
@@ -1669,6 +1731,30 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 # 8. PRODUCT CARD & PURCHASE ENGINE
 # ------------------------------------------------------------------------------
 
+
+async def post_transaction_to_channel(bot, receipt_no: str, customer_name: str, telegram_id: int, product_name: str, quantity: int, total_bdt: float):
+    """Broadcasts sale transaction to the proof channel matching image_206ea3.png format."""
+    bot_info = await bot.get_me()
+    text = (
+        f"🔔 <b>নতুন প্রোডাক্ট সেল হয়েছে!</b>\n"
+        f"🧾 Receipt: {receipt_no}\n"
+        f"👤 কাস্টমার: {customer_name} (ID: <code>{telegram_id}</code>)\n"
+        f"📦 প্রোডাক্ট: {product_name}\n"
+        f"🔢 পরিমাণ: {quantity} টি | মূল্য: {total_bdt:.2f} BDT"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 Buy Products", url=f"https://t.me/{bot_info.username}")]
+    ])
+    try:
+        await bot.send_message(
+            chat_id=TRANSACTION_CHANNEL_ID,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+        )
+    except Exception as e:
+        logger.debug(f"Channel transaction post error: {e}")
+
 async def render_purchase_summary(query_or_message, prod_id: int, quantity: int = 1, edit: bool = True):
     """Renders the interactive Purchase Summary card with live calculator buttons matching image_2e14ee.png."""
     conn = get_db()
@@ -1937,7 +2023,7 @@ async def process_order(query, prod_id: int, quantity: int):
             except Exception as e:
                 logger.error(f"Error sending PDF receipt: {e}")
 
-            # Alert Admin
+            # Alert Admin & Post to Proof Channel
             try:
                 await get_bot(query).send_message(
                     chat_id=SUPER_ADMIN_ID,
@@ -1952,6 +2038,11 @@ async def process_order(query, prod_id: int, quantity: int):
                 )
             except Exception:
                 pass
+
+            # Broadcast Real Transaction to Channel
+            asyncio.create_task(
+                post_transaction_to_channel(get_bot(query), receipt_no, user_name, user_id, full_product_name, quantity, total_bdt)
+            )
             return
 
         # If out of stock / On-demand -> Create Pending Order with Full Notifications & PDF Receipt
@@ -2057,6 +2148,7 @@ async def admin_panel_menu_handler(update: Update, context: ContextTypes.DEFAULT
         f"💳 পেন্ডিং ডিপোজিট: <b>{pend_dep}</b> টি\n"
         f"🛡️ পেন্ডিং ম্যানুয়াল অর্ডার: <b>{pend_ord}</b> টি"
     )
+    status_tx = "🟢 Auto Channel Sales: ON" if _AUTO_SALES_ACTIVE else "🔴 Auto Channel Sales: OFF"
     kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📥 Add Stock", callback_data="adm_stk_step1_cats"),
@@ -2073,12 +2165,91 @@ async def admin_panel_menu_handler(update: Update, context: ContextTypes.DEFAULT
         [
             InlineKeyboardButton("👥 User Management", callback_data="adm_usr_list_0"),
             InlineKeyboardButton("📊 Shop Statistics", callback_data="adm_statistics"),
+        ],
+        [
+            InlineKeyboardButton("🧾 Check / Download Receipt", callback_data="adm_check_receipt"),
+            InlineKeyboardButton(status_tx, callback_data="adm_toggle_autosales"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Factory Reset / Clear Data", callback_data="adm_factory_reset_warn"),
         ]
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
+
+    # Force Join Verification Check Button
+    if data == "btn_check_verification":
+        in_group, in_channel = await check_user_membership(context.bot, user_id)
+        if in_group and in_channel:
+            await query.answer("🎉 ভেরিফিকেশন সফল হয়েছে!", show_alert=True)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            shop_name = get_setting("shop_name", "CyberNest Market")
+            welcome_text = (
+                f"🎉 <b>স্বাগতম, {query.from_user.full_name}!</b> ✨\n\n"
+                f"💎 <b>{shop_name}</b>\n"
+                f"─────────────────────────────\n"
+                f"🛍️ প্রিমিয়াম VPN, Proxy আর Mail সার্ভিস — সবচেয়ে দ্রুত ডেলিভারিতে, ২৪/৭।\n\n"
+                f"📌 নিচের মেনু থেকে বেছে নিন 👇"
+            )
+            reply_kb = get_main_reply_keyboard(user_id)
+            await query.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=reply_kb)
+        else:
+            await query.answer("❌ আপনি এখনো গ্রুপ বা চ্যানেলে জয়েন করেননি! দয়া করে জয়েন করে আবার চাপুন।", show_alert=True)
+            kb = get_force_join_keyboard(in_group, in_channel)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                pass
+        return
+
+    # Admin Receipt Lookup
+    if data == "adm_check_receipt":
+        set_user_state(user_id, "ADMIN_WAITING_RECEIPT_CODE", {})
+        await query.message.reply_text("🧾 <b>রিসিপ্ট কোডটি লিখুন:</b>\n(যেমন: <code>RCP-14AB642E92</code> বা শুধু <code>14AB642E92</code>)", parse_mode=ParseMode.HTML)
+        return
+
+    # Toggle Auto Channel Sales
+    if data == "adm_toggle_autosales":
+        global _AUTO_SALES_ACTIVE
+        _AUTO_SALES_ACTIVE = not _AUTO_SALES_ACTIVE
+        state_str = "চালু করা হয়েছে 🟢" if _AUTO_SALES_ACTIVE else "বন্ধ করা হয়েছে 🔴"
+        await query.answer(f"চ্যানেল অটো ট্রানজ্যাকশন {state_str}!", show_alert=True)
+        # Refresh dashboard
+        data = "adm_root"
+
+    # Factory Reset Warning & Execution
+    if data == "adm_factory_reset_warn":
+        warn_txt = (
+            "⚠️ <b>সতর্কবার্তা: আপনি কি নিশ্চিত যে ফ্যাক্টরি রিসেট করবেন?</b>\n\n"
+            "• সকল টেস্ট অর্ডার ও হিস্টোরি মুছে যাবে।\n"
+            "• সকল স্টক ডেটা ক্লিয়ার হয়ে যাবে।\n"
+            "• সকল টেস্ট ডিপোজিট মুছে যাবে।\n"
+            "• ইউজারদের ব্যালেন্স ০ হয়ে ফ্রেশ শুরু হবে।\n\n"
+            "<i>(শপের নাম, ক্যাটাগরি ও পেমেন্ট সেটিংস অক্ষত থাকবে)</i>"
+        )
+        r_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔴 Yes, Wipe All Data", callback_data="adm_factory_reset_confirm")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="adm_root")]
+        ])
+        await query.edit_message_text(warn_txt, parse_mode=ParseMode.HTML, reply_markup=r_kb)
+        return
+
+    if data == "adm_factory_reset_confirm":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM orders")
+        c.execute("DELETE FROM stock")
+        c.execute("DELETE FROM deposits")
+        c.execute("UPDATE users SET balance_bdt = 0")
+        conn.commit()
+        conn.close()
+        await query.edit_message_text("✅ <b>ফ্যাক্টরি রিসেট সম্পন্ন!</b>\nবটের সকল টেস্ট অর্ডার, স্টক ও ডিপোজিট সফলভাবে মুছে ফেলা হয়েছে। বট এখন সম্পূর্ণ নতুন শোরুমের মতো ফ্রেশ!", parse_mode=ParseMode.HTML)
+        return
 
     # Root Admin Dashboard
     if data == "adm_root":
@@ -2096,6 +2267,7 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             f"💳 পেন্ডিং ডিপোজিট: <b>{pend_dep}</b> টি\n"
             f"🛡️ পেন্ডিং ম্যানুয়াল অর্ডার: <b>{pend_ord}</b> টি"
         )
+        status_tx = "🟢 Auto Channel Sales: ON" if _AUTO_SALES_ACTIVE else "🔴 Auto Channel Sales: OFF"
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📥 Add Stock", callback_data="adm_stk_step1_cats"),
@@ -2112,6 +2284,13 @@ async def handle_admin_callbacks(query, data: str, context: ContextTypes.DEFAULT
             [
                 InlineKeyboardButton("👥 User Management", callback_data="adm_usr_list_0"),
                 InlineKeyboardButton("📊 Shop Statistics", callback_data="adm_statistics"),
+            ],
+            [
+                InlineKeyboardButton("🧾 Check / Download Receipt", callback_data="adm_check_receipt"),
+                InlineKeyboardButton(status_tx, callback_data="adm_toggle_autosales"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Factory Reset / Clear Data", callback_data="adm_factory_reset_warn"),
             ]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -3197,6 +3376,62 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("অর্ডার পাওয়া যায়নি।")
         return
 
+    # Admin Receipt Lookup Code Input
+    if state == "ADMIN_WAITING_RECEIPT_CODE":
+        set_user_state(user.id, None)
+        rcode = text.strip().upper()
+        if not rcode.startswith("RCP-") and len(rcode) == 10:
+            rcode = f"RCP-{rcode}"
+        
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+        SELECT o.*, u.name as uname, u.username as u_username
+        FROM orders o
+        JOIN users u ON o.user_id = u.user_id
+        WHERE o.receipt_no = ? OR o.receipt_no LIKE ?
+        LIMIT 1
+        """, (rcode, f"%{rcode}%"))
+        o = c.fetchone()
+        conn.close()
+
+        if not o:
+            await update.message.reply_text(f"❌ রিসিট কোড <code>{rcode}</code>-এর কোনো অর্ডার পাওয়া যায়নি।", parse_mode=ParseMode.HTML)
+            return
+
+        bot_info = await context.bot.get_me()
+        try:
+            pdf_bio = generate_pdf_receipt(
+                receipt_no=o["receipt_no"],
+                date_str=o["order_date"],
+                day_name=o["day_of_week"] or "N/A",
+                customer_name=o["uname"],
+                telegram_id=o["user_id"],
+                username=o["u_username"] or "",
+                item_desc=o["product_name"],
+                category_name=o["category_name"] or "DIGITAL",
+                qty=o["quantity"],
+                unit_price=o["unit_price"] or o["total_bdt"],
+                total_bdt=o["total_bdt"],
+                bot_username=bot_info.username,
+            )
+            caption = (
+                f"🧾 <b>Official Payment Receipt Found:</b> <code>{o['receipt_no']}</code>\n"
+                f"👤 কাস্টমার: {o['uname']} (ID: <code>{o['user_id']}</code>)\n"
+                f"📦 প্রোডাক্ট: {o['product_name']}\n"
+                f"🔢 পরিমাণ: {o['quantity']} টি | মূল্য: {o['total_bdt']:.2f} BDT\n"
+                f"📅 তারিখ: {o['order_date']}"
+            )
+            await update.message.reply_document(
+                document=InputFile(pdf_bio, filename=f"Receipt_{o['receipt_no']}.pdf"),
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error(f"Error generating receipt for admin: {e}")
+            await update.message.reply_text(f"❌ রিসিট তৈরি করতে সমস্যা হয়েছে: {e}")
+        return
+
     # Rename Subcategory / Brand
     if state == "ADMIN_WAITING_REN_SUB":
         sub_id = sdata.get("sub_id")
@@ -3493,6 +3728,83 @@ async def post_init(application):
     except Exception:
         _GLOBAL_EVENT_LOOP = asyncio.get_event_loop_policy().get_event_loop()
     logger.info("CyberNest Bot post_init completed successfully.")
+    asyncio.create_task(send_periodic_channel_transactions(application))
+
+
+async def send_periodic_channel_transactions(application):
+    """Periodically broadcasts simulated sales to the proof channel for social proof."""
+    await asyncio.sleep(10)
+    while True:
+        global _AUTO_SALES_ACTIVE
+        if _AUTO_SALES_ACTIVE:
+            try:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("""
+                SELECT p.name as prod_name, s.name as sub_name, p.price_bdt 
+                FROM products p 
+                JOIN subcategories s ON p.subcategory_id = s.id 
+                ORDER BY RANDOM() LIMIT 1
+                """)
+                row = c.fetchone()
+                conn.close()
+
+                if row:
+                    c_name = random.choice(CUSTOMER_SAMPLE_NAMES)
+                    fake_uid = random.randint(7100000000, 7999999999)
+                    qty = random.choice([1, 1, 1, 2, 2, 4, 5, 10])
+                    p_name = f"{row['sub_name']} ({row['prod_name']})"
+                    total_p = row['price_bdt'] * qty
+                    fake_receipt = f"RCP-{secrets.token_hex(5).upper()}"
+                    await post_transaction_to_channel(application.bot, fake_receipt, c_name, fake_uid, p_name, qty, total_p)
+            except Exception as e:
+                logger.debug(f"Auto periodic sales loop error: {e}")
+
+        # Sleep between 5 to 7 minutes before sending next transaction
+        await asyncio.sleep(random.randint(300, 420))
+
+async def send_auto_delete_welcome_group(bot, chat_id, user):
+    """Sends greeting in welcome group and automatically deletes after 30 seconds."""
+    user_id = user.id
+    if user_id in _RECENTLY_WELCOMED:
+        return
+    _RECENTLY_WELCOMED.add(user_id)
+
+    user_link = f'<a href="tg://user?id={user.id}">{user.full_name or "মেম্বার"}</a>'
+    welcome_text = (
+        f"🌸 <b>আসসালামু আলাইকুম</b>, {user_link}! ✨\n\n"
+        f"আমাদের কমিউনিটি গ্রুপে আপনাকে স্বাগতম। 🎉\n"
+        f"📌 গ্রুপের নিয়ম-কানুন মেনে চলুন এবং নিয়মিত ডিজিটাল সার্ভিসেস আপডেট উপভোগ করুন।"
+    )
+    try:
+        sent_msg = await bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode=ParseMode.HTML)
+        await asyncio.sleep(30)
+        await bot.delete_message(chat_id=chat_id, message_id=sent_msg.message_id)
+    except Exception as e:
+        logger.debug(f"Welcome group delete error: {e}")
+    finally:
+        await asyncio.sleep(60)
+        _RECENTLY_WELCOMED.discard(user_id)
+
+async def handle_new_group_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != WELCOME_GROUP_ID:
+        return
+    if update.message and update.message.new_chat_members:
+        for member in update.message.new_chat_members:
+            if not member.is_bot:
+                asyncio.create_task(send_auto_delete_welcome_group(context.bot, chat_id, member))
+
+async def handle_group_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != WELCOME_GROUP_ID:
+        return
+    result = update.chat_member
+    if result:
+        new_m = result.new_chat_member
+        if new_m.status in ["member", "administrator"] and result.old_chat_member.status in ["left", "kicked"]:
+            if not new_m.user.is_bot:
+                asyncio.create_task(send_auto_delete_welcome_group(context.bot, chat_id, new_m.user))
 
 def main():
     print("=" * 60)
@@ -3515,6 +3827,10 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     _GLOBAL_BOT_APP = app
+
+    # Group Welcome Event Handlers
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_group_members))
+    app.add_handler(ChatMemberHandler(handle_group_member_updated, ChatMemberHandler.CHAT_MEMBER))
 
     # Handlers Registration
     app.add_handler(CommandHandler("start", start_handler))
