@@ -64,7 +64,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CyberNestBot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8656707191:AAEqK_Dn6M_OhFP12ATl6g5WyNCY02Db_sk")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8656707191:AAERO6QtMeCReOnfyhaZ4iFt7BRjulcsMTQ")
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8919985167"))
 # ------------------------------------------------------------------------------
 # GROUP & CHANNEL CONFIGURATION (Force Join & Real-Time Proofs)
